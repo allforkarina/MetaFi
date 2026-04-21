@@ -87,6 +87,16 @@
 - Default evaluation thresholds are `PCK@10` through `PCK@50`, implemented as normalized thresholds `0.10` through `0.50`.
 - The default optimizer preparation follows the paper setting: SGDM with batch size `32`, learning rate `0.001`, momentum `0.9`, and lambda-based decay to zero.
 
+## Trainer Engine
+
+- The training engine uses `WPFormer`, `train_loader`, `val_loader`, and an explicit target device.
+- Local execution is only for code-path validation and short smoke tests; full 50-epoch training runs on the Linux server.
+- The default training schedule is 50 epochs with SGDM and lambda-based decay to zero.
+- Each training epoch records average `train_loss`, and each validation epoch records average `val_loss` plus `PCK@10` through `PCK@50`.
+- The trainer tracks `best_val_pck50` and saves the best checkpoint only.
+- Loss visualization is required: after each epoch, update a loss curve plot that shows both train loss and val loss across epochs.
+- Save the loss curve image inside the training output directory so each training run keeps its own loss-trend figure.
+
 ## Code Change Principles
 
 - Preserve code readability in every change.

@@ -8,6 +8,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 
 DEFAULT_BATCH_SIZE = 32
+DEFAULT_NUM_EPOCHS = 50
 DEFAULT_LR = 1e-3
 DEFAULT_MOMENTUM = 0.9
 DEFAULT_PCK_THRESHOLDS = (0.10, 0.20, 0.30, 0.40, 0.50)
