@@ -75,6 +75,18 @@
 - Average only across the last dimension of size `12`, then transpose to produce the final pose output shape `[B, 17, 2]`.
 - This implementation lives in `models/transformer_decoder.py`.
 
+## WPFormer Wrapper And Training Utilities
+
+- The top-level end-to-end model is `WPFormer`, which chains `SharedCNN` and `TransformerDecoderModule`.
+- `WPFormer` takes CSI amplitude input with shape `[B, 3, 114, 10]` and outputs pose predictions with shape `[B, 17, 2]`.
+- The training loss is plain coordinate-space MSE between predictions and labels.
+- Do not add pose adjacency matrix constraints to the loss, because the paper reports that such constraints hurt performance for MetaFi++.
+- The main evaluation metric is torso-normalized PCK.
+- Use the Euclidean distance between the right shoulder and left hip ground-truth keypoints as the torso length reference.
+- Under the COCO 17-keypoint order used in this project, the right shoulder index is `6` and the left hip index is `11`.
+- Default evaluation thresholds are `PCK@10` through `PCK@50`, implemented as normalized thresholds `0.10` through `0.50`.
+- The default optimizer preparation follows the paper setting: SGDM with batch size `32`, learning rate `0.001`, momentum `0.9`, and lambda-based decay to zero.
+
 ## Code Change Principles
 
 - Preserve code readability in every change.
