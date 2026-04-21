@@ -93,6 +93,8 @@
 - Local execution is only for code-path validation and short smoke tests; full 50-epoch training runs on the Linux server.
 - The default training schedule is 50 epochs with SGDM and lambda-based decay to zero.
 - Each training epoch records average `train_loss`, and each validation epoch records average `val_loss` plus `PCK@10` through `PCK@50`.
+- Show per-batch `tqdm` progress bars for both training and validation so batch throughput can be observed during interactive runs.
+- Keep `tqdm` progress bars disabled automatically in non-interactive or redirected-log runs such as `nohup`, so log files stay readable.
 - The trainer tracks `best_val_pck50` and saves the best checkpoint only.
 - Loss visualization is required: after each epoch, update a loss curve plot that shows both train loss and val loss across epochs.
 - Save the loss curve image inside the training output directory so each training run keeps its own loss-trend figure.

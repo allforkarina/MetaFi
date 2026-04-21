@@ -3,10 +3,12 @@ from __future__ import annotations
 """Training loop and checkpoint management for WPFormer."""
 
 from pathlib import Path
+import sys
 from typing import Any
 
 import torch
 from torch import Tensor, nn
+from tqdm import tqdm
 
 from .config import DEFAULT_NUM_EPOCHS, build_default_optimizer, build_lambda_scheduler
 from .objectives import calculate_mse_loss, calculate_pck_scores
@@ -51,44 +53,59 @@ class Trainer:
         targets = batch["keypoints"].float().to(self.device)    # [B, 17, 2]
         return inputs, targets
 
-    def train_epoch(self) -> dict[str, float]:
+    def _create_progress_bar(self, loader, description: str):
+        return tqdm(
+            loader,
+            desc=description,
+            leave=False,
+            dynamic_ncols=True,
+            disable=not sys.stderr.isatty(),
+        )
+
+    def train_epoch(self, epoch: int | None = None) -> dict[str, float]:
         self.model.train()
         total_loss = 0.0
         total_samples = 0
+        description = f"Train {epoch}/{self.num_epochs}" if epoch is not None else "Train"
 
-        for batch in self.train_loader:
-            inputs, targets = self._prepare_batch(batch)
+        with self._create_progress_bar(self.train_loader, description) as progress_bar:
+            for batch in progress_bar:
+                inputs, targets = self._prepare_batch(batch)
 
-            self.optimizer.zero_grad()                          # zero the parameter gradients
-            predictions = self.model(inputs)                    # predictions
-            loss = calculate_mse_loss(predictions, targets)     # calculate the MSE loss
-            loss.backward()                                     # calculate the gradients of parameters
-            self.optimizer.step()                               # optimize the parameters
+                self.optimizer.zero_grad()                          # zero the parameter gradients
+                predictions = self.model(inputs)                    # predictions
+                loss = calculate_mse_loss(predictions, targets)     # calculate the MSE loss
+                loss.backward()                                     # calculate the gradients of parameters
+                self.optimizer.step()                               # optimize the parameters
 
-            batch_size = inputs.shape[0]
-            total_loss += loss.item() * batch_size              # total loss for epoch
-            total_samples += batch_size                         # total samples for epoch
+                batch_size = inputs.shape[0]
+                total_loss += loss.item() * batch_size              # total loss for epoch
+                total_samples += batch_size                         # total samples for epoch
+                progress_bar.set_postfix(train_loss=total_loss / total_samples)
 
         return {"train_loss": total_loss / total_samples}       # average loss
 
-    def validate_epoch(self) -> dict[str, float]:
+    def validate_epoch(self, epoch: int | None = None) -> dict[str, float]:
         self.model.eval()                                       # validation mode (no model update)
         total_loss = 0.0
         total_samples = 0
         all_predictions: list[Tensor] = []
         all_targets: list[Tensor] = []
+        description = f"Val {epoch}/{self.num_epochs}" if epoch is not None else "Val"
 
         with torch.no_grad():
-            for batch in self.val_loader:
-                inputs, targets = self._prepare_batch(batch)
-                predictions = self.model(inputs)
-                loss = calculate_mse_loss(predictions, targets)
+            with self._create_progress_bar(self.val_loader, description) as progress_bar:
+                for batch in progress_bar:
+                    inputs, targets = self._prepare_batch(batch)
+                    predictions = self.model(inputs)
+                    loss = calculate_mse_loss(predictions, targets)
 
-                batch_size = inputs.shape[0]
-                total_loss += loss.item() * batch_size
-                total_samples += batch_size
-                all_predictions.append(predictions.detach().cpu())
-                all_targets.append(targets.detach().cpu())
+                    batch_size = inputs.shape[0]
+                    total_loss += loss.item() * batch_size
+                    total_samples += batch_size
+                    all_predictions.append(predictions.detach().cpu())
+                    all_targets.append(targets.detach().cpu())
+                    progress_bar.set_postfix(val_loss=total_loss / total_samples)
 
         predictions = torch.cat(all_predictions, dim=0)         # B, 17, 2
         targets = torch.cat(all_targets, dim=0)                 # B, 17, 2
@@ -148,8 +165,8 @@ class Trainer:
             epoch = epoch_index + 1                                 # current epoch
             current_lr = self.optimizer.param_groups[0]["lr"]       # current learning rate
 
-            train_metrics = self.train_epoch()                      # training for one epoch
-            val_metrics = self.validate_epoch()                     # validation for one epoch
+            train_metrics = self.train_epoch(epoch=epoch)           # training for one epoch
+            val_metrics = self.validate_epoch(epoch=epoch)          # validation for one epoch
 
             epoch_record = {                                        # logs
                 "epoch": epoch,

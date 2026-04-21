@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -109,3 +110,22 @@ def test_scheduler_changes_learning_rate_after_fit(tmp_path: Path) -> None:
     trainer.fit()
 
     assert trainer.optimizer.param_groups[0]["lr"] < initial_lr
+
+
+def test_fit_runs_without_progress_bar_in_non_interactive_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
+
+    trainer = Trainer(
+        model=WPFormer(),
+        train_loader=_make_dummy_loader(),
+        val_loader=_make_dummy_loader(),
+        device="cpu",
+        num_epochs=1,
+        output_dir=tmp_path,
+    )
+
+    history = trainer.fit()
+
+    assert len(history) == 1
