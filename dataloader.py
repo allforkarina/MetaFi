@@ -27,7 +27,7 @@ FRAMES_PER_SAMPLE = 297
 KEYPOINT_SHAPE = (17, 2)
 CSI_SHAPE = (3, 114, 10)
 
-
+# Sequence-level : Axx/Syy/rgb(wifi-csi) total frames
 @dataclass(frozen=True)
 class SampleSequence:
     """One sample sequence under Axx/Syy before expanding it into aligned frames."""
@@ -39,6 +39,7 @@ class SampleSequence:
     csi_dir: Path
 
 
+# Frame-level : Axx/Syy/envz/rgb(wifi-csi)/framexxx
 @dataclass(frozen=True)
 class FrameRecord:
     """One aligned frame pair consisting of pose labels and CSI measurements."""
@@ -46,7 +47,7 @@ class FrameRecord:
     action: str             # Axx  : A01 - A27
     sample: str             # Syy  : S01 - S40
     environment: str        # envz : env1 - env4, mapped from Syy in blocks of ten samples
-    frame_stem: str         # frame001 - frame297
+    frame_stem: str         # frame indice
     keypoint_path: Path
     csi_path: Path
 
@@ -89,7 +90,8 @@ def sample_to_environment(sample_name: str) -> str:
 def _sorted_dirs(root: Path, prefix: str) -> List[Path]:
     """List prefixed directories in lexicographic order for deterministic traversal."""
 
-    return sorted(                                      # find paths
+    # use prefix to judge the dir
+    return sorted( 
         [path for path in root.iterdir() if path.is_dir() and path.name.startswith(prefix)],
         key=lambda path: path.name,
     )
@@ -117,6 +119,7 @@ def discover_sample_sequences(dataset_root: str | Path) -> List[SampleSequence]:
                     f"Expected aligned rgb and wifi-csi directories under {sample_dir}"
                 )
 
+            # All frames, frame001 - frame297
             sequences.append(
                 SampleSequence(
                     action=action_dir.name,
@@ -177,6 +180,7 @@ def build_sample_splits(
     return splits
 
 
+# from sequence to frame, expand the sequence.
 def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecord]:
     """Expand selected sample sequences into frame-level aligned label/CSI records."""
 
@@ -197,7 +201,7 @@ def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecor
                 f"found {len(keypoint_files)}"
             )
 
-        # keypoints, CSI pairs
+        # keypoints, CSI files, pairs the data and labels
         for keypoint_path, csi_path in zip(keypoint_files, csi_files):
             if keypoint_path.stem != csi_path.stem:
                 raise ValueError(
@@ -205,6 +209,7 @@ def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecor
                     f"{keypoint_path.name} vs {csi_path.name}"
                 )
 
+            # expand to frame-level records, frame001 - frame297
             records.append(
                 FrameRecord(
                     action=sequence.action,
@@ -262,8 +267,9 @@ def build_h5_dataset(
     split_records = {
         split_name: expand_frame_records(sample_splits[split_name]) for split_name in SPLIT_NAMES
     }
-    # Turn the sequence into frame-level
-    total_records = sum(len(records) for records in split_records.values())
+    
+    # calculate the size of each dataset split, pre-allocated.
+    total_records = sum(len(records) for records in split_records.values())     
     string_dtype = h5py.string_dtype(encoding="utf-8")
 
     # "w" -> write
@@ -289,6 +295,7 @@ def build_h5_dataset(
         h5_file.attrs["seed"] = seed
         h5_file.attrs["frames_per_sample"] = FRAMES_PER_SAMPLE
 
+        # Start writing the data
         offset = 0
         with tqdm(total=total_records, desc="Packing HDF5", dynamic_ncols=True) as progress_bar:
             for split_name in SPLIT_NAMES:
@@ -371,6 +378,7 @@ class MMFiPoseDataset:
         }
 
 
+# Put MMFiPoseDataset into DataLoader, batch and shuffle.
 def create_data_loader(
     dataset_root: str | Path,
     split: str,
@@ -388,7 +396,7 @@ def create_data_loader(
             "Install torch to create DataLoader instances."
         )
 
-    del seed, split_ratios
+    del seed, split_ratios  # pre-allocated while build .h5 file
 
     dataset = MMFiPoseDataset(dataset_root=dataset_root, split=split)
     should_shuffle = shuffle if shuffle is not None else split == "train"
