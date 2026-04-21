@@ -62,6 +62,19 @@
 - Concatenate the three branch outputs along the last dimension to produce `[B, 512, 17, 12]`.
 - This Shared CNN implementation lives in `models/shared_cnn.py`.
 
+## Transformer And Decoder Module
+
+- The Transformer and decoder stage consumes Shared CNN features with shape `[B, 512, 17, 12]`.
+- Flatten the last two dimensions so the attention input becomes `[B, 512, 204]`.
+- Use a learned positional embedding with shape `[1, 512, 204]` and add it directly to the flattened features.
+- The self-attention stage uses one layer with 3 heads and treats `512` as the token dimension and `204` as the embedding dimension.
+- The attention implementation follows the paper-specific design: compute attention matrices for each head, average the attention matrices across heads, and then apply the averaged attention to the value features.
+- Use instance normalization after the attention residual connection.
+- Reshape the attention output back to `[B, 512, 17, 12]` before decoding.
+- The decoder uses `3x3 Conv: 512 -> 32`, then `1x1 Conv: 32 -> 2`, producing `[B, 2, 17, 12]`.
+- Average only across the last dimension of size `12`, then transpose to produce the final pose output shape `[B, 17, 2]`.
+- This implementation lives in `models/transformer_decoder.py`.
+
 ## Code Change Principles
 
 - Preserve code readability in every change.
