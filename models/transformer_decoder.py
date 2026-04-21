@@ -37,9 +37,9 @@ class AveragedHeadSelfAttention(nn.Module):
         return x.view(batch_size, num_tokens, self.num_heads, self.head_dim).permute(0, 2, 1, 3)    # divide the feature_dim -> heads, dim | shape: batch_size, num_heads, 512, head_dim
 
     def _compute_averaged_attention(self, q: Tensor, k: Tensor) -> Tensor:
-        attn_logits = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)               # matrix multiplication, scaled by sqrt of dim
-        attn_per_head = torch.softmax(attn_logits, dim=-1)                                          # softmax at the dimension of tokens (512)
-        return attn_per_head.mean(dim=1)                                                            # average pool
+        attn_logits = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)               # matrix multiplication and scaling, calculate the attention.
+        attn_per_head = torch.softmax(attn_logits, dim=-1)                                          # softmax at the dimension of tokens (512) for each head
+        return attn_per_head.mean(dim=1)                                                            # average pool each head's attention logits (share attention)
 
     def forward(self, x: Tensor) -> Tensor:
         if x.ndim != 3 or x.shape[-1] != self.embed_dim:
@@ -52,7 +52,7 @@ class AveragedHeadSelfAttention(nn.Module):
         v = self._reshape_heads(self.v_proj(x))
         averaged_attention = self._compute_averaged_attention(q, k)                                 # Q dot K with scale for attention
 
-        attended_values = torch.einsum("bij,bhjd->bhid", averaged_attention, v)                     # sum up the value and average pool
+        attended_values = torch.einsum("bij,bhjd->bhid", averaged_attention, v)                     # einsum to apply average attention to V
         attended_values = attended_values.permute(0, 2, 1, 3).contiguous()                          # change the head the token channel dim
         attended_values = attended_values.view(x.shape[0], x.shape[1], self.embed_dim)              # concat head and dim back to original shape
 
@@ -77,7 +77,7 @@ class PoseDecoder(nn.Module):
         x = self.conv1(x)   # 512 -> 32
         x = self.relu(x)    # 32 -> 32
         x = self.conv2(x)   # 32 -> 2
-        return x
+        return x            # B, 2, 17, 12, the "2" channel defined as the X and Y of keypoints
 
 
 class TransformerDecoderModule(nn.Module):
@@ -88,7 +88,7 @@ class TransformerDecoderModule(nn.Module):
         self.num_tokens = 512
         self.embedding_dim = 17 * 12
 
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_tokens, self.embedding_dim))  # 1, 512, 204
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_tokens, self.embedding_dim))  # 1, 512, 204, zero tensor (learnable)
         self.attention = AveragedHeadSelfAttention(
             embed_dim=self.embedding_dim,                                                   # embedding dim = 204
             num_heads=3,                                                                    # channel of each head = 204 / 3 = 68
@@ -108,10 +108,10 @@ class TransformerDecoderModule(nn.Module):
             raise ValueError(f"Expected input with shape [B, 512, 17, 12], got {tuple(x.shape)}")
 
         x = self._flatten_spatial(x)            # B, 512, 17, 12 -> B, 512, 204
-        x = x + self.pos_embed                  # add learnable positional embedding (Init is )
+        x = x + self.pos_embed                  # add learnable positional embedding (Init is zero tensor)
         x = self.attention(x)                   # self-attention with averaged attention across heads, shape unchanged
         x = self._restore_spatial(x)            # flatten the embedding dim, from 204 to 17, 12
         x = self.decoder(x)                     # regression to keypoints, from 512 -> 32 -> 2
-        x = x.mean(dim=-1)                      # average pool over the spatial dimensions
-        x = x.transpose(1, 2)
+        x = x.mean(dim=-1)                      # average pool over the spatial dimensions, 12 to none
+        x = x.transpose(1, 2)                   # out -> B, 17, 2
         return x
