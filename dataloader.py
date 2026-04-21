@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - handled at runtime when torch is unava
     DataLoader = None
 
 
+# 定义数据集路径、数据集划分
 DEFAULT_LOCAL_DATASET_ROOT = Path(r"D:\Files\WiFi_Pose\WiFiPoseV3\data\dataset")
 DEFAULT_LINUX_DATASET_ROOT = Path("/data/WiFiPose/dataset/dataset")
 SPLIT_NAMES = ("train", "val", "test")
@@ -33,28 +34,29 @@ FRAMES_PER_SAMPLE = 297
 class SampleSequence:
     """One sample sequence under Axx/Syy, before expanding it into 297 frames."""
 
-    action: str
-    sample: str
-    environment: str
-    rgb_dir: Path
-    csi_dir: Path
+    action: str         # Axx - action
+    sample: str         # Syy - sample
+    environment: str    # env1 to env4 - define by the id of sample, 10 sample per env
+    rgb_dir: Path       # Label directory
+    csi_dir: Path       # raw csi directory
 
 
 @dataclass(frozen=True)
 class FrameRecord:
     """One aligned frame pair consisting of pose labels and CSI measurements."""
 
-    action: str
-    sample: str
-    environment: str
-    frame_stem: str
-    keypoint_path: Path
-    csi_path: Path
+    action: str             # Axx - action
+    sample: str             # Syy - sample
+    environment: str        # env1 to env4 - define by the id of sample, 10 sample per env
+    frame_stem: str         # Frame identifier - from 001 to 297
+    keypoint_path: Path     # Path to pose labels
+    csi_path: Path          # Path to CSI measurements
 
 
 def resolve_dataset_root(dataset_root: Optional[str | Path] = None) -> Path:
     """Resolve the dataset root for the current machine or an explicit override."""
 
+    # Judging the dataset path through the following order
     if dataset_root is not None:
         root = Path(dataset_root)
     elif DEFAULT_LOCAL_DATASET_ROOT.exists():
@@ -70,8 +72,8 @@ def resolve_dataset_root(dataset_root: Optional[str | Path] = None) -> Path:
 def sample_to_environment(sample_name: str) -> str:
     """Map sample ids S01-S40 to env1-env4 in blocks of ten samples."""
 
-    sample_index = int(sample_name[1:])
-    environment_index = (sample_index - 1) // 10 + 1
+    sample_index = int(sample_name[1:])                 # Syy -> yy as id
+    environment_index = (sample_index - 1) // 10 + 1    # yy / 10 -> env id
     return f"env{environment_index}"
 
 
@@ -79,6 +81,7 @@ def _sorted_dirs(root: Path, prefix: str) -> List[Path]:
     """List prefixed directories in lexicographic order for deterministic traversal."""
 
     return sorted(
+        # If path exist and prefix match, then sorted by name
         [path for path in root.iterdir() if path.is_dir() and path.name.startswith(prefix)],
         key=lambda path: path.name,
     )
@@ -87,6 +90,7 @@ def _sorted_dirs(root: Path, prefix: str) -> List[Path]:
 def discover_sample_sequences(dataset_root: str | Path) -> List[SampleSequence]:
     """Scan the dataset root and collect all available Axx/Syy sample sequences."""
 
+    # root path
     root = resolve_dataset_root(dataset_root)
     sequences: List[SampleSequence] = []
 
@@ -94,11 +98,14 @@ def discover_sample_sequences(dataset_root: str | Path) -> List[SampleSequence]:
         for sample_dir in _sorted_dirs(action_dir, "S"):
             rgb_dir = sample_dir / "rgb"
             csi_dir = sample_dir / "wifi-csi"
+
+            # keypoints or csi directory missing -> Error
             if not rgb_dir.is_dir() or not csi_dir.is_dir():
                 raise FileNotFoundError(
                     f"Expected aligned rgb and wifi-csi directories under {sample_dir}"
                 )
 
+            # Axx/Syy/envz/rgb & Axx/Syy/envz/wifi-csi, each Sequence is 297 frames
             sequences.append(
                 SampleSequence(
                     action=action_dir.name,
@@ -122,12 +129,14 @@ def build_sample_splits(
 ) -> Dict[str, List[SampleSequence]]:
     """Split each (action, environment) group with a fixed 6:2:2 sample ratio."""
 
-    ratios = split_ratios or SPLIT_RATIOS
+    ratios = split_ratios or SPLIT_RATIOS       # 数据集划分比例
+
     if tuple(ratios.keys()) != SPLIT_NAMES:
         raise ValueError(f"Split keys must be exactly {SPLIT_NAMES}, got {tuple(ratios.keys())}")
     if sum(ratios.values()) != 10:
         raise ValueError("Per-environment split ratios must sum to 10 samples")
 
+    # unordered grouping, key is (Axx, envz), each Axx has 4 envz, each envz has 10 samples
     grouped_sequences: Dict[Tuple[str, str], List[SampleSequence]] = {}
     for sequence in discover_sample_sequences(dataset_root):
         grouped_sequences.setdefault((sequence.action, sequence.environment), []).append(sequence)
@@ -165,10 +174,10 @@ def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecor
 
     records: List[FrameRecord] = []
     for sequence in sequences:
-        keypoint_files = _sorted_files(sequence.rgb_dir, "*.npy")
-        csi_files = _sorted_files(sequence.csi_dir, "*.mat")
+        keypoint_files = _sorted_files(sequence.rgb_dir, "*.npy")   # keypoints end
+        csi_files = _sorted_files(sequence.csi_dir, "*.mat")        # csi end
 
-        if len(keypoint_files) != len(csi_files):
+        if len(keypoint_files) != len(csi_files):                   # It must be aligned
             raise ValueError(
                 f"Mismatched frame count for {sequence.action}/{sequence.sample}: "
                 f"{len(keypoint_files)} labels vs {len(csi_files)} CSI files"
@@ -188,6 +197,7 @@ def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecor
                     f"{keypoint_path.name} vs {csi_path.name}"
                 )
 
+            # pair csi and keypoints as one record
             records.append(
                 FrameRecord(
                     action=sequence.action,
@@ -215,10 +225,11 @@ class MMFiPoseDataset:
         if split not in SPLIT_NAMES:
             raise ValueError(f"split must be one of {SPLIT_NAMES}, got {split}")
 
-        self.dataset_root = resolve_dataset_root(dataset_root)
-        self.split = split
-        self.seed = seed
-        self.split_ratios = split_ratios or SPLIT_RATIOS
+        self.dataset_root = resolve_dataset_root(dataset_root)  # dataset root path
+        self.split = split                                      # split as train/val/test
+        self.seed = seed                                        # random seed 
+        self.split_ratios = split_ratios or SPLIT_RATIOS        # split ratios, default 6:2:2
+
         # First split by sample sequence, then expand the selected sequences into frames.
         self.sample_splits = build_sample_splits(
             self.dataset_root, seed=self.seed, split_ratios=self.split_ratios
@@ -302,6 +313,8 @@ def create_data_loaders(
         for split in SPLIT_NAMES
     }
 
+
+# ================ Below are utility functions for CLI preview and sanity checks ================
 
 def summarize_splits(
     dataset_root: str | Path,
