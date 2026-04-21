@@ -81,15 +81,15 @@ def resolve_h5_dataset_path(dataset_root: str | Path) -> Path:
 def sample_to_environment(sample_name: str) -> str:
     """Map sample ids S01-S40 to env1-env4 in blocks of ten samples."""
 
-    sample_index = int(sample_name[1:])
-    environment_index = (sample_index - 1) // 10 + 1
+    sample_index = int(sample_name[1:])                 # Syy -> yy -> turn to int
+    environment_index = (sample_index - 1) // 10 + 1    # yy: 1-10 -> env1, 11-20 -> env2, 21-30 -> env3, 31-40 -> env4
     return f"env{environment_index}"
 
 
 def _sorted_dirs(root: Path, prefix: str) -> List[Path]:
     """List prefixed directories in lexicographic order for deterministic traversal."""
 
-    return sorted(
+    return sorted(                                      # find paths
         [path for path in root.iterdir() if path.is_dir() and path.name.startswith(prefix)],
         key=lambda path: path.name,
     )
@@ -104,13 +104,13 @@ def _sorted_files(directory: Path, pattern: str) -> List[Path]:
 def discover_sample_sequences(dataset_root: str | Path) -> List[SampleSequence]:
     """Scan the raw dataset root and collect all available Axx/Syy sample sequences."""
 
-    root = resolve_dataset_root(dataset_root)
-    sequences: List[SampleSequence] = []
+    root = resolve_dataset_root(dataset_root)               # dataset root
+    sequences: List[SampleSequence] = []                    # Sequence
 
-    for action_dir in _sorted_dirs(root, "A"):
-        for sample_dir in _sorted_dirs(action_dir, "S"):
-            rgb_dir = sample_dir / "rgb"
-            csi_dir = sample_dir / "wifi-csi"
+    for action_dir in _sorted_dirs(root, "A"):              # Axx
+        for sample_dir in _sorted_dirs(action_dir, "S"):    # Syy
+            rgb_dir = sample_dir / "rgb"                    # rgb, keypoints
+            csi_dir = sample_dir / "wifi-csi"               # wifi-csi, CSI amplitude and phase
 
             if not rgb_dir.is_dir() or not csi_dir.is_dir():
                 raise FileNotFoundError(
@@ -140,17 +140,20 @@ def build_sample_splits(
 ) -> Dict[str, List[SampleSequence]]:
     """Split each (action, environment) group with a fixed 6:2:2 sample ratio."""
 
-    ratios = split_ratios or SPLIT_RATIOS
+    # 6:2:2 default split ratio for train, val, test
+    ratios = split_ratios or SPLIT_RATIOS       
 
     if tuple(ratios.keys()) != SPLIT_NAMES:
         raise ValueError(f"Split keys must be exactly {SPLIT_NAMES}, got {tuple(ratios.keys())}")
     if sum(ratios.values()) != 10:
         raise ValueError("Per-environment split ratios must sum to 10 samples")
 
+    # unordered grouping: action, environment -> Syy (Frame001 -> Frame297)
     grouped_sequences: Dict[Tuple[str, str], List[SampleSequence]] = {}
     for sequence in discover_sample_sequences(dataset_root):
         grouped_sequences.setdefault((sequence.action, sequence.environment), []).append(sequence)
 
+    # split rule.
     splits: Dict[str, List[SampleSequence]] = {name: [] for name in SPLIT_NAMES}
     for (action, environment), sequences in sorted(grouped_sequences.items()):
         ordered_sequences = sorted(sequences, key=lambda item: item.sample)
@@ -159,15 +162,17 @@ def build_sample_splits(
                 f"Expected 10 samples for {action}/{environment}, found {len(ordered_sequences)}"
             )
 
+        # shuffle first, in Axx/Envz dim.
         group_rng = random.Random(f"{seed}:{action}:{environment}")
         shuffled_sequences = ordered_sequences[:]
         group_rng.shuffle(shuffled_sequences)
 
+        # choose the first 6 for train, next 2 for val, last 2 for test, in the shuffled order.
         train_end = ratios["train"]
         val_end = train_end + ratios["val"]
-        splits["train"].extend(shuffled_sequences[:train_end])
-        splits["val"].extend(shuffled_sequences[train_end:val_end])
-        splits["test"].extend(shuffled_sequences[val_end:])
+        splits["train"].extend(shuffled_sequences[:train_end])          # 1 - 6
+        splits["val"].extend(shuffled_sequences[train_end:val_end])     # 7 - 8
+        splits["test"].extend(shuffled_sequences[val_end:])             # 9 - 10
 
     return splits
 
@@ -192,6 +197,7 @@ def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecor
                 f"found {len(keypoint_files)}"
             )
 
+        # keypoints, CSI pairs
         for keypoint_path, csi_path in zip(keypoint_files, csi_files):
             if keypoint_path.stem != csi_path.stem:
                 raise ValueError(
@@ -247,18 +253,22 @@ def build_h5_dataset(
 ) -> Dict[str, int]:
     """Pack the raw MM-Fi dataset into a single HDF5 file with materialized split indices."""
 
-    source_root = resolve_dataset_root(dataset_root)
-    target_path = Path(output_path)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
+    source_root = resolve_dataset_root(dataset_root)        # raw dataset root
+    target_path = Path(output_path)                         # target hdf5 dataset path
+    target_path.parent.mkdir(parents=True, exist_ok=True)   # ensure the dir exists
 
+    # First split in Sequence level
     sample_splits = build_sample_splits(source_root, seed=seed, split_ratios=split_ratios)
     split_records = {
         split_name: expand_frame_records(sample_splits[split_name]) for split_name in SPLIT_NAMES
     }
+    # Turn the sequence into frame-level
     total_records = sum(len(records) for records in split_records.values())
     string_dtype = h5py.string_dtype(encoding="utf-8")
 
+    # "w" -> write
     with h5py.File(target_path, "w") as h5_file:
+        # Add keypoints, CSI amplitude/phase, and action/sample/environment/frame_id to the HDF5 file.
         keypoints_dataset = h5_file.create_dataset(
             "keypoints", shape=(total_records, *KEYPOINT_SHAPE), dtype=np.float32
         )
