@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""MM-Fi dataloader with per-(action, environment) mixed splitting.
+
+This module keeps the split at the sample-sequence level first and then expands
+each selected sequence into aligned frame pairs. That prevents frame-level
+leakage across train/validation/test sets.
+"""
+
 import argparse
 import random
 from dataclasses import dataclass
@@ -24,6 +31,8 @@ FRAMES_PER_SAMPLE = 297
 
 @dataclass(frozen=True)
 class SampleSequence:
+    """One sample sequence under Axx/Syy, before expanding it into 297 frames."""
+
     action: str
     sample: str
     environment: str
@@ -33,6 +42,8 @@ class SampleSequence:
 
 @dataclass(frozen=True)
 class FrameRecord:
+    """One aligned frame pair consisting of pose labels and CSI measurements."""
+
     action: str
     sample: str
     environment: str
@@ -42,6 +53,8 @@ class FrameRecord:
 
 
 def resolve_dataset_root(dataset_root: Optional[str | Path] = None) -> Path:
+    """Resolve the dataset root for the current machine or an explicit override."""
+
     if dataset_root is not None:
         root = Path(dataset_root)
     elif DEFAULT_LOCAL_DATASET_ROOT.exists():
@@ -55,12 +68,16 @@ def resolve_dataset_root(dataset_root: Optional[str | Path] = None) -> Path:
 
 
 def sample_to_environment(sample_name: str) -> str:
+    """Map sample ids S01-S40 to env1-env4 in blocks of ten samples."""
+
     sample_index = int(sample_name[1:])
     environment_index = (sample_index - 1) // 10 + 1
     return f"env{environment_index}"
 
 
 def _sorted_dirs(root: Path, prefix: str) -> List[Path]:
+    """List prefixed directories in lexicographic order for deterministic traversal."""
+
     return sorted(
         [path for path in root.iterdir() if path.is_dir() and path.name.startswith(prefix)],
         key=lambda path: path.name,
@@ -68,6 +85,8 @@ def _sorted_dirs(root: Path, prefix: str) -> List[Path]:
 
 
 def discover_sample_sequences(dataset_root: str | Path) -> List[SampleSequence]:
+    """Scan the dataset root and collect all available Axx/Syy sample sequences."""
+
     root = resolve_dataset_root(dataset_root)
     sequences: List[SampleSequence] = []
 
@@ -101,6 +120,8 @@ def build_sample_splits(
     seed: int = 42,
     split_ratios: Optional[Dict[str, int]] = None,
 ) -> Dict[str, List[SampleSequence]]:
+    """Split each (action, environment) group with a fixed 6:2:2 sample ratio."""
+
     ratios = split_ratios or SPLIT_RATIOS
     if tuple(ratios.keys()) != SPLIT_NAMES:
         raise ValueError(f"Split keys must be exactly {SPLIT_NAMES}, got {tuple(ratios.keys())}")
@@ -119,6 +140,7 @@ def build_sample_splits(
                 f"Expected 10 samples for {action}/{environment}, found {len(ordered_sequences)}"
             )
 
+        # Shuffle inside each (action, environment) group so every split mixes all environments.
         group_rng = random.Random(f"{seed}:{action}:{environment}")
         shuffled_sequences = ordered_sequences[:]
         group_rng.shuffle(shuffled_sequences)
@@ -133,10 +155,14 @@ def build_sample_splits(
 
 
 def _sorted_files(directory: Path, pattern: str) -> List[Path]:
+    """List files in lexicographic order so frame alignment stays deterministic."""
+
     return sorted(directory.glob(pattern), key=lambda path: path.name)
 
 
 def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecord]:
+    """Expand selected sample sequences into frame-level aligned label/CSI records."""
+
     records: List[FrameRecord] = []
     for sequence in sequences:
         keypoint_files = _sorted_files(sequence.rgb_dir, "*.npy")
@@ -154,6 +180,7 @@ def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecor
                 f"found {len(keypoint_files)}"
             )
 
+        # Frame names must stay aligned because one pose frame matches one CSI frame.
         for keypoint_path, csi_path in zip(keypoint_files, csi_files):
             if keypoint_path.stem != csi_path.stem:
                 raise ValueError(
@@ -176,6 +203,8 @@ def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecor
 
 
 class MMFiPoseDataset:
+    """Frame-level dataset that returns aligned pose labels and CSI tensors."""
+
     def __init__(
         self,
         dataset_root: str | Path,
@@ -190,6 +219,7 @@ class MMFiPoseDataset:
         self.split = split
         self.seed = seed
         self.split_ratios = split_ratios or SPLIT_RATIOS
+        # First split by sample sequence, then expand the selected sequences into frames.
         self.sample_splits = build_sample_splits(
             self.dataset_root, seed=self.seed, split_ratios=self.split_ratios
         )
@@ -200,6 +230,8 @@ class MMFiPoseDataset:
         return len(self.records)
 
     def __getitem__(self, index: int) -> Dict[str, np.ndarray | str]:
+        """Load one frame's keypoints and CSI amplitude/phase arrays."""
+
         record = self.records[index]
         keypoints = np.load(record.keypoint_path).astype(np.float32)
         csi_data = loadmat(record.csi_path)
@@ -226,6 +258,8 @@ def create_data_loader(
     shuffle: Optional[bool] = None,
     split_ratios: Optional[Dict[str, int]] = None,
 ):
+    """Create one PyTorch DataLoader for the requested split."""
+
     if DataLoader is None:
         raise ImportError(
             "PyTorch is not installed in the current environment. "
@@ -254,6 +288,8 @@ def create_data_loaders(
     num_workers: int = 0,
     split_ratios: Optional[Dict[str, int]] = None,
 ):
+    """Create train/val/test DataLoaders with the same split configuration."""
+
     return {
         split: create_data_loader(
             dataset_root=dataset_root,
@@ -272,6 +308,8 @@ def summarize_splits(
     seed: int = 42,
     split_ratios: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Dict[str, int]]:
+    """Return dataset statistics after applying the sample-level split."""
+
     sample_splits = build_sample_splits(dataset_root, seed=seed, split_ratios=split_ratios)
     summary: Dict[str, Dict[str, int]] = {}
 
@@ -289,6 +327,8 @@ def summarize_splits(
 
 
 def _preview_sample(dataset: MMFiPoseDataset) -> Dict[str, Tuple[int, ...] | str]:
+    """Load the first sample of a split and expose only shape-level information."""
+
     sample = dataset[0]
     return {
         "action": sample["action"],
@@ -302,6 +342,8 @@ def _preview_sample(dataset: MMFiPoseDataset) -> Dict[str, Tuple[int, ...] | str
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for split summary and optional sample preview."""
+
     parser = argparse.ArgumentParser(description="MM-Fi WiFi pose dataloader preview")
     parser.add_argument("--dataset-root", type=str, default=None, help="Dataset root path")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic split seed")
@@ -314,6 +356,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Print split statistics and, optionally, one loaded sample per split."""
+
     args = parse_args()
     dataset_root = resolve_dataset_root(args.dataset_root)
     summary = summarize_splits(dataset_root, seed=args.seed)
