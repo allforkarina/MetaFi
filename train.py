@@ -13,7 +13,12 @@ from training import DEFAULT_BATCH_SIZE, DEFAULT_NUM_EPOCHS, Trainer
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train WPFormer on the MM-Fi dataset")
-    parser.add_argument("--dataset-root", type=str, default=None, help="Dataset root path")
+    parser.add_argument(
+        "--dataset-root",
+        type=str,
+        required=True,
+        help="Path to the prepacked HDF5 dataset file",
+    )
     parser.add_argument(
         "--device",
         type=str,

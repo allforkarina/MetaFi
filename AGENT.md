@@ -24,6 +24,8 @@
 - Treat `git push` to GitHub as a required final step for every project update.
 - Local dataset root: `D:\Files\WiFi_Pose\WiFiPoseV3\data\dataset`.
 - Linux dataset root: `/data/WiFiPose/dataset/dataset`.
+- To avoid repeated `.mat` parsing during training, prepack the raw dataset into one HDF5 file before formal training.
+- Generate the HDF5 dataset on the Linux server and use that HDF5 file for full training runs.
 
 ## Project Goal
 
@@ -49,7 +51,15 @@
 - For each `(action, environment)` group, split the 10 samples with ratio `6:2:2` into train, validation, and test subsets.
 - After sample-level splitting, expand each selected sample sequence into its 297 aligned frame pairs.
 - The environment setting is mixed across all subsets because every action contributes samples from every environment to train, validation, and test.
-- The current repository provides this logic in `dataloader.py`.
+- Materialize the train/validation/test frame indices during HDF5 preprocessing instead of recomputing them at training time.
+- The current repository provides this logic in `dataloader.py` and `scripts/build_h5_dataset.py`.
+
+## HDF5 Dataset Format
+
+- The formal training dataset is a single HDF5 file, not a directory of individual `.npy` and `.mat` files.
+- Store `keypoints`, `csi_amplitude`, `csi_phase`, `action`, `sample`, `environment`, and `frame_id` in the HDF5 file.
+- Store `train_indices`, `val_indices`, and `test_indices` in the same HDF5 file so training can load splits directly.
+- Keep `csi_phase` in the HDF5 file even though the current model trains only on `csi_amplitude`.
 
 ## Shared CNN Encoder
 
@@ -91,6 +101,7 @@
 
 - The training engine uses `WPFormer`, `train_loader`, `val_loader`, and an explicit target device.
 - Local execution is only for code-path validation and short smoke tests; full 50-epoch training runs on the Linux server.
+- The training dataloaders read from the prepacked HDF5 dataset, not from the raw per-frame `.npy` and `.mat` files.
 - The default training schedule is 50 epochs with SGDM and lambda-based decay to zero.
 - Each training epoch records average `train_loss`, and each validation epoch records average `val_loss` plus `PCK@10` through `PCK@50`.
 - Show per-batch `tqdm` progress bars for both training and validation so batch throughput can be observed during interactive runs.
