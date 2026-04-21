@@ -13,6 +13,9 @@
 ## Development And Training Workflow
 
 - Write and modify code locally in this repository.
+- Activate the dedicated Conda environment with `conda activate WiFiPose` before running project commands whenever environment-dependent execution is needed.
+- If required packages are missing in `WiFiPose`, install them in that environment as part of the task.
+- Use the GPU-enabled PyTorch package already installed in the `WiFiPose` environment for model development, testing, and training-related execution.
 - Use the local machine to verify that code can run and that basic checks pass.
 - Run full training jobs on the Linux server, not on the local machine.
 - Keep the local machine and the Linux server synchronized through Git.
@@ -47,6 +50,17 @@
 - After sample-level splitting, expand each selected sample sequence into its 297 aligned frame pairs.
 - The environment setting is mixed across all subsets because every action contributes samples from every environment to train, validation, and test.
 - The current repository provides this logic in `dataloader.py`.
+
+## Shared CNN Encoder
+
+- The first model-stage CSI encoder uses amplitude-only input from `csi_amplitude`.
+- The Shared CNN module expects one frame of CSI input with shape `[B, 3, 114, 10]`.
+- The input is split into three single-antenna branches, one branch per receiving antenna.
+- Each branch is upsampled from `[B, 1, 114, 10]` to `[B, 1, 136, 32]` with bilinear interpolation.
+- All three branches pass through the same CNN backbone instance, so weights are shared across antennas.
+- The shared backbone output for each branch is `[B, 512, 17, 4]`.
+- Concatenate the three branch outputs along the last dimension to produce `[B, 512, 17, 12]`.
+- This Shared CNN implementation lives in `models/shared_cnn.py`.
 
 ## Code Change Principles
 
