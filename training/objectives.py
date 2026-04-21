@@ -9,9 +9,9 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-RIGHT_SHOULDER_INDEX = 6
-LEFT_HIP_INDEX = 11
-EPSILON = 1e-8
+RIGHT_SHOULDER_INDEX = 6    # Keypoint index of the right shoulder
+LEFT_HIP_INDEX = 11         # Keypoint index of the left hip
+EPSILON = 1e-8              # constant to avoid division by zero
 
 
 def calculate_mse_loss(predictions: Tensor, targets: Tensor) -> Tensor:
@@ -30,10 +30,11 @@ def calculate_mse_loss(predictions: Tensor, targets: Tensor) -> Tensor:
     return F.mse_loss(predictions, targets)
 
 
+# human body constrain loss to avoid unreasonable pose
 def _calculate_torso_length(targets: Tensor) -> Tensor:
     right_shoulder = targets[:, RIGHT_SHOULDER_INDEX, :]
     left_hip = targets[:, LEFT_HIP_INDEX, :]
-    return torch.linalg.norm(right_shoulder - left_hip, dim=-1)
+    return torch.linalg.norm(right_shoulder - left_hip, dim=-1)     # distance between right shoulder and left hip
 
 
 def calculate_pck(predictions: Tensor, targets: Tensor, threshold: float) -> Tensor:
@@ -49,11 +50,11 @@ def calculate_pck(predictions: Tensor, targets: Tensor, threshold: float) -> Ten
             f"Expected predictions and targets with shape [B, 17, 2], got {tuple(predictions.shape)}"
         )
 
-    errors = torch.linalg.norm(predictions - targets, dim=-1)
+    errors = torch.linalg.norm(predictions - targets, dim=-1)       # B, 17 pairs of keypoints in total
     torso_length = _calculate_torso_length(targets).unsqueeze(-1)
-    normalized_errors = errors / (torso_length + EPSILON)
-    correct_keypoints = normalized_errors < threshold
-    return correct_keypoints.float().mean()
+    normalized_errors = errors / (torso_length + EPSILON)           # normalize
+    correct_keypoints = normalized_errors < threshold               # calculate the correct pairs' num
+    return correct_keypoints.float().mean()                         # average over all keypoints and batch to get the PCK score
 
 
 def calculate_pck_scores(

@@ -18,10 +18,10 @@ class Trainer:
     def __init__(
         self,
         model: nn.Module,
-        train_loader,
-        val_loader,
-        device: str | torch.device,
-        num_epochs: int = DEFAULT_NUM_EPOCHS,
+        train_loader,                                   # train_dataset dataloader
+        val_loader,                                     # val_dataset dataloader
+        device: str | torch.device,                     # default "cuda" if available, else "cpu"
+        num_epochs: int = DEFAULT_NUM_EPOCHS,           # 50
         checkpoint_path: str | Path | None = None,
         output_dir: str | Path = "outputs",
     ) -> None:
@@ -31,8 +31,8 @@ class Trainer:
         self.val_loader = val_loader
         self.num_epochs = num_epochs
         self.output_dir = Path(output_dir)
-        self.plot_dir = self.output_dir / "plots"
-        self.checkpoint_dir = self.output_dir / "checkpoints"
+        self.plot_dir = self.output_dir / "plots"               # store the loss curve plot
+        self.checkpoint_dir = self.output_dir / "checkpoints"   # store the best checkpoint of pck@50
         self.checkpoint_path = (
             Path(checkpoint_path) if checkpoint_path is not None else self.checkpoint_dir / "best_wpformer.pt"
         )
@@ -41,14 +41,14 @@ class Trainer:
         self.plot_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.optimizer = build_default_optimizer(self.model)
+        self.optimizer = build_default_optimizer(self.model)    # AdamW optimizer
         self.scheduler = build_lambda_scheduler(self.optimizer, total_epochs=self.num_epochs)
-        self.best_val_pck50 = 0.0
-        self.history: list[dict[str, float]] = []
+        self.best_val_pck50 = 0.0                               # best pck@50
+        self.history: list[dict[str, float]] = []               # trainning parameters history
 
     def _prepare_batch(self, batch: dict[str, Any]) -> tuple[Tensor, Tensor]:
-        inputs = batch["csi_amplitude"].float().to(self.device)
-        targets = batch["keypoints"].float().to(self.device)
+        inputs = batch["csi_amplitude"].float().to(self.device) # [B, 3, 114, 10]
+        targets = batch["keypoints"].float().to(self.device)    # [B, 17, 2]
         return inputs, targets
 
     def train_epoch(self) -> dict[str, float]:
@@ -59,20 +59,20 @@ class Trainer:
         for batch in self.train_loader:
             inputs, targets = self._prepare_batch(batch)
 
-            self.optimizer.zero_grad()
-            predictions = self.model(inputs)
-            loss = calculate_mse_loss(predictions, targets)
-            loss.backward()
-            self.optimizer.step()
+            self.optimizer.zero_grad()                          # zero the parameter gradients
+            predictions = self.model(inputs)                    # predictions
+            loss = calculate_mse_loss(predictions, targets)     # calculate the MSE loss
+            loss.backward()                                     # calculate the gradients of parameters
+            self.optimizer.step()                               # optimize the parameters
 
             batch_size = inputs.shape[0]
-            total_loss += loss.item() * batch_size
-            total_samples += batch_size
+            total_loss += loss.item() * batch_size              # total loss for epoch
+            total_samples += batch_size                         # total samples for epoch
 
-        return {"train_loss": total_loss / total_samples}
+        return {"train_loss": total_loss / total_samples}       # average loss
 
     def validate_epoch(self) -> dict[str, float]:
-        self.model.eval()
+        self.model.eval()                                       # validation mode (no model update)
         total_loss = 0.0
         total_samples = 0
         all_predictions: list[Tensor] = []
@@ -90,9 +90,9 @@ class Trainer:
                 all_predictions.append(predictions.detach().cpu())
                 all_targets.append(targets.detach().cpu())
 
-        predictions = torch.cat(all_predictions, dim=0)
-        targets = torch.cat(all_targets, dim=0)
-        metrics = calculate_pck_scores(predictions, targets)
+        predictions = torch.cat(all_predictions, dim=0)         # B, 17, 2
+        targets = torch.cat(all_targets, dim=0)                 # B, 17, 2
+        metrics = calculate_pck_scores(predictions, targets)    # calculate pck@10, 20, 30, 40, 50
 
         return {
             "val_loss": total_loss / total_samples,
@@ -143,14 +143,15 @@ class Trainer:
         return loss_curve_path
 
     def fit(self) -> list[dict[str, float]]:
+        # epoch training.
         for epoch_index in range(self.num_epochs):
-            epoch = epoch_index + 1
-            current_lr = self.optimizer.param_groups[0]["lr"]
+            epoch = epoch_index + 1                                 # current epoch
+            current_lr = self.optimizer.param_groups[0]["lr"]       # current learning rate
 
-            train_metrics = self.train_epoch()
-            val_metrics = self.validate_epoch()
+            train_metrics = self.train_epoch()                      # training for one epoch
+            val_metrics = self.validate_epoch()                     # validation for one epoch
 
-            epoch_record = {
+            epoch_record = {                                        # logs
                 "epoch": epoch,
                 "train_loss": train_metrics["train_loss"],
                 "val_loss": val_metrics["val_loss"],
@@ -163,9 +164,9 @@ class Trainer:
             }
             self.history.append(epoch_record)
 
-            self._save_best_checkpoint(epoch=epoch, metrics=val_metrics)
-            self._save_loss_curve()
-            self.scheduler.step()
+            self._save_best_checkpoint(epoch=epoch, metrics=val_metrics)    # find the best checkpoints.
+            self._save_loss_curve()                                         # re-cover update for each epoch
+            self.scheduler.step()                                           # update learning rate
 
             print(
                 f"Epoch {epoch}/{self.num_epochs} | "
@@ -175,5 +176,5 @@ class Trainer:
                 f"lr={epoch_record['lr']:.6f}"
             )
 
-        self._save_loss_curve()
+        self._save_loss_curve()                                             # final loss curve
         return self.history
