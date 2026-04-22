@@ -54,6 +54,7 @@ class Trainer:
         targets = batch["keypoints"].float().to(self.device)    # [B, 17, 2]
         return inputs, targets
 
+    # get the scaling factors for keypoints
     def _resolve_keypoint_scales(self) -> tuple[float, float]:
         dataset = getattr(self.train_loader, "dataset", None)
         normalization = getattr(dataset, "keypoint_normalization", "")
@@ -64,6 +65,7 @@ class Trainer:
         y_scale = float(getattr(dataset, "keypoint_y_scale", 1.0))
         return x_scale, y_scale
 
+    # using the scaling factors to de-normalize the keypoints
     def _denormalize_keypoints_for_metrics(self, keypoints: Tensor) -> Tensor:
         restored = keypoints.clone()
         restored[..., 0] = restored[..., 0] * self.keypoint_x_scale
@@ -124,11 +126,11 @@ class Trainer:
                     all_targets.append(targets.detach().cpu())
                     progress_bar.set_postfix(val_loss=total_loss / total_samples)
 
-        predictions = torch.cat(all_predictions, dim=0)         # B, 17, 2
-        targets = torch.cat(all_targets, dim=0)                 # B, 17, 2
-        predictions = self._denormalize_keypoints_for_metrics(predictions)
-        targets = self._denormalize_keypoints_for_metrics(targets)
-        metrics = calculate_pck_scores(predictions, targets)    # calculate pck@10, 20, 30, 40, 50
+        predictions = torch.cat(all_predictions, dim=0)                         # B, 17, 2
+        targets = torch.cat(all_targets, dim=0)                                 # B, 17, 2
+        predictions = self._denormalize_keypoints_for_metrics(predictions)      # de-normalize the prediction keypoints
+        targets = self._denormalize_keypoints_for_metrics(targets)              # de-normalize the target keypoints
+        metrics = calculate_pck_scores(predictions, targets)                    # calculate pck@10, 20, 30, 40, 50 in raw scale
 
         return {
             "val_loss": total_loss / total_samples,
