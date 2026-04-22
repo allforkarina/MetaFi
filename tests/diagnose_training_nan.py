@@ -96,6 +96,9 @@ def inspect_h5_metadata(dataset_path: Path) -> dict[str, Any]:
             "amplitude_normalization": h5_file.attrs.get("amplitude_normalization"),
             "amplitude_train_min": h5_file.attrs.get("amplitude_train_min"),
             "amplitude_train_max": h5_file.attrs.get("amplitude_train_max"),
+            "keypoint_normalization": h5_file.attrs.get("keypoint_normalization"),
+            "keypoint_x_scale": h5_file.attrs.get("keypoint_x_scale"),
+            "keypoint_y_scale": h5_file.attrs.get("keypoint_y_scale"),
             "train_frames": len(h5_file["train_indices"]),
             "val_frames": len(h5_file["val_indices"]),
             "test_frames": len(h5_file["test_indices"]),
@@ -105,9 +108,19 @@ def inspect_h5_metadata(dataset_path: Path) -> dict[str, Any]:
         print(f"{key}: {value}")
 
     normalization_ok = metadata["amplitude_normalization"] == "train_global_minmax"
-    min_ok = is_finite_number(metadata["amplitude_train_min"])
-    max_ok = is_finite_number(metadata["amplitude_train_max"])
-    metadata["metadata_ok"] = normalization_ok and min_ok and max_ok
+    amplitude_min_ok = is_finite_number(metadata["amplitude_train_min"])
+    amplitude_max_ok = is_finite_number(metadata["amplitude_train_max"])
+    keypoint_normalization_ok = metadata["keypoint_normalization"] == "train_axis_max"
+    keypoint_x_ok = is_finite_number(metadata["keypoint_x_scale"])
+    keypoint_y_ok = is_finite_number(metadata["keypoint_y_scale"])
+    metadata["metadata_ok"] = (
+        normalization_ok
+        and amplitude_min_ok
+        and amplitude_max_ok
+        and keypoint_normalization_ok
+        and keypoint_x_ok
+        and keypoint_y_ok
+    )
     print(f"metadata_ok: {metadata['metadata_ok']}")
     return metadata
 

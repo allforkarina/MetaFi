@@ -24,11 +24,10 @@ def _create_raw_dataset(root: Path, frames_per_sample: int) -> None:
 
         for frame_index in range(1, frames_per_sample + 1):
             frame_name = f"frame{frame_index:03d}"
-            keypoints = np.full(
-                dataloader.KEYPOINT_SHAPE,
-                fill_value=(sample_index * 10 + frame_index),
-                dtype=np.float32,
-            )
+            keypoint_base = sample_index * 10 + frame_index
+            keypoints = np.empty(dataloader.KEYPOINT_SHAPE, dtype=np.float32)
+            keypoints[:, 0] = keypoint_base
+            keypoints[:, 1] = keypoint_base * 2
             amplitude = np.full(
                 dataloader.CSI_SHAPE,
                 fill_value=(sample_index * 100 + frame_index),
@@ -64,11 +63,19 @@ def test_build_h5_dataset_preserves_shapes_values_and_split_counts(
     first_train_record = dataloader.expand_frame_records(
         dataloader.build_sample_splits(raw_root, seed=7)["train"]
     )[0]
-    raw_keypoints, cleaned_amplitude, raw_phase = dataloader._prepare_raw_frame(first_train_record)
+    raw_keypoints, cleaned_amplitude = dataloader._prepare_raw_frame(first_train_record)
     train_records = dataloader.expand_frame_records(
         dataloader.build_sample_splits(raw_root, seed=7)["train"]
     )
     expected_train_min, expected_train_max = dataloader._compute_train_amplitude_bounds(train_records)
+    expected_keypoint_x_scale, expected_keypoint_y_scale = dataloader._compute_train_keypoint_scales(
+        train_records
+    )
+    expected_normalized_keypoints = dataloader._normalize_keypoints(
+        raw_keypoints,
+        x_scale=expected_keypoint_x_scale,
+        y_scale=expected_keypoint_y_scale,
+    )
     expected_normalized_amplitude = dataloader._normalize_csi_amplitude(
         cleaned_amplitude,
         train_min=expected_train_min,
@@ -78,7 +85,7 @@ def test_build_h5_dataset_preserves_shapes_values_and_split_counts(
     with h5py.File(output_path, "r") as h5_file:
         assert h5_file["keypoints"].shape == (80, 17, 2)
         assert h5_file["csi_amplitude"].shape == (80, 3, 114, 10)
-        assert h5_file["csi_phase"].shape == (80, 3, 114, 10)
+        assert "csi_phase" not in h5_file
         assert h5_file["train_indices"].shape == (48,)
         assert h5_file["val_indices"].shape == (16,)
         assert h5_file["test_indices"].shape == (16,)
@@ -86,19 +93,25 @@ def test_build_h5_dataset_preserves_shapes_values_and_split_counts(
         assert h5_file.attrs["amplitude_normalization"] == dataloader.AMPLITUDE_NORMALIZATION_ATTR
         assert h5_file.attrs["amplitude_train_min"] == pytest.approx(expected_train_min)
         assert h5_file.attrs["amplitude_train_max"] == pytest.approx(expected_train_max)
+        assert h5_file.attrs["keypoint_normalization"] == dataloader.KEYPOINT_NORMALIZATION_ATTR
+        assert h5_file.attrs["keypoint_x_scale"] == pytest.approx(expected_keypoint_x_scale)
+        assert h5_file.attrs["keypoint_y_scale"] == pytest.approx(expected_keypoint_y_scale)
 
-        np.testing.assert_allclose(h5_file["keypoints"][0], raw_keypoints)
+        np.testing.assert_allclose(h5_file["keypoints"][0], expected_normalized_keypoints)
         np.testing.assert_allclose(h5_file["csi_amplitude"][0], expected_normalized_amplitude)
-        np.testing.assert_allclose(h5_file["csi_phase"][0], raw_phase)
         assert h5_file["action"][0].decode("utf-8") == first_train_record.action
         assert h5_file["sample"][0].decode("utf-8") == first_train_record.sample
         assert h5_file["environment"][0].decode("utf-8") == first_train_record.environment
         assert h5_file["frame_id"][0].decode("utf-8") == first_train_record.frame_stem
 
         train_values = h5_file["csi_amplitude"][h5_file["train_indices"][:]]
+        train_keypoints = h5_file["keypoints"][h5_file["train_indices"][:]]
         assert np.isfinite(train_values).all()
+        assert np.isfinite(train_keypoints).all()
         assert float(train_values.min()) == pytest.approx(0.0)
         assert float(train_values.max()) == pytest.approx(1.0)
+        assert float(train_keypoints[..., 0].max()) == pytest.approx(1.0)
+        assert float(train_keypoints[..., 1].max()) == pytest.approx(1.0)
 
 
 def test_h5_dataset_and_dataloader_return_expected_fields(
@@ -126,14 +139,13 @@ def test_h5_dataset_and_dataloader_return_expected_fields(
     assert sample["frame_id"].startswith("frame")
     assert sample["keypoints"].shape == (17, 2)
     assert sample["csi_amplitude"].shape == (3, 114, 10)
-    assert sample["csi_phase"].shape == (3, 114, 10)
+    assert "csi_phase" not in sample
 
     loaders = dataloader.create_data_loaders(output_path, batch_size=4, num_workers=0)
     batch = next(iter(loaders["train"]))
 
     assert batch["keypoints"].shape == (4, 17, 2)
     assert batch["csi_amplitude"].shape == (4, 3, 114, 10)
-    assert batch["csi_phase"].shape == (4, 3, 114, 10)
 
     train_dataset.close()
     val_dataset.close()
@@ -160,7 +172,7 @@ def test_build_h5_dataset_cleans_non_finite_amplitude_values(
         assert np.isfinite(h5_file["csi_amplitude"][:]).all()
 
 
-def test_build_h5_dataset_rejects_non_finite_phase_values(
+def test_build_h5_dataset_rejects_non_finite_keypoint_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     raw_root = tmp_path / "dataset"
@@ -168,11 +180,26 @@ def test_build_h5_dataset_rejects_non_finite_phase_values(
     monkeypatch.setattr(dataloader, "FRAMES_PER_SAMPLE", 2)
     _create_raw_dataset(raw_root, frames_per_sample=2)
 
-    corrupted_path = raw_root / "A01" / "S01" / "wifi-csi" / "frame001.mat"
-    corrupted = loadmat(corrupted_path)
-    phase = np.asarray(corrupted["CSIphase"], dtype=np.float32)
-    phase[0, 0, 0] = np.nan
-    savemat(corrupted_path, {"CSIamp": corrupted["CSIamp"], "CSIphase": phase})
+    corrupted_path = raw_root / "A01" / "S01" / "rgb" / "frame001.npy"
+    keypoints = np.load(corrupted_path).astype(np.float32)
+    keypoints[0, 0] = np.nan
+    np.save(corrupted_path, keypoints)
 
-    with pytest.raises(ValueError, match="CSI phase contains non-finite values"):
+    with pytest.raises(ValueError, match="Keypoints contain non-finite values"):
         dataloader.build_h5_dataset(raw_root, output_path, seed=11)
+
+
+def test_keypoint_normalize_then_denormalize_restores_values() -> None:
+    keypoints = np.array(
+        [
+            [10.0, 20.0],
+            [30.0, 60.0],
+        ],
+        dtype=np.float32,
+    )
+
+    normalized = dataloader._normalize_keypoints(keypoints, x_scale=30.0, y_scale=60.0)
+    restored = dataloader.denormalize_keypoints(normalized, x_scale=30.0, y_scale=60.0)
+
+    np.testing.assert_allclose(normalized, np.array([[1.0 / 3.0, 1.0 / 3.0], [1.0, 1.0]], dtype=np.float32))
+    np.testing.assert_allclose(restored, keypoints)

@@ -47,11 +47,28 @@ class Trainer:
         self.scheduler = build_lambda_scheduler(self.optimizer, total_epochs=self.num_epochs)
         self.best_val_pck50 = 0.0                               # best pck@50
         self.history: list[dict[str, float]] = []               # trainning parameters history
+        self.keypoint_x_scale, self.keypoint_y_scale = self._resolve_keypoint_scales()
 
     def _prepare_batch(self, batch: dict[str, Any]) -> tuple[Tensor, Tensor]:
         inputs = batch["csi_amplitude"].float().to(self.device) # [B, 3, 114, 10]
         targets = batch["keypoints"].float().to(self.device)    # [B, 17, 2]
         return inputs, targets
+
+    def _resolve_keypoint_scales(self) -> tuple[float, float]:
+        dataset = getattr(self.train_loader, "dataset", None)
+        normalization = getattr(dataset, "keypoint_normalization", "")
+        if normalization != "train_axis_max":
+            return 1.0, 1.0
+
+        x_scale = float(getattr(dataset, "keypoint_x_scale", 1.0))
+        y_scale = float(getattr(dataset, "keypoint_y_scale", 1.0))
+        return x_scale, y_scale
+
+    def _denormalize_keypoints_for_metrics(self, keypoints: Tensor) -> Tensor:
+        restored = keypoints.clone()
+        restored[..., 0] = restored[..., 0] * self.keypoint_x_scale
+        restored[..., 1] = restored[..., 1] * self.keypoint_y_scale
+        return restored
 
     def _create_progress_bar(self, loader, description: str):
         return tqdm(
@@ -109,6 +126,8 @@ class Trainer:
 
         predictions = torch.cat(all_predictions, dim=0)         # B, 17, 2
         targets = torch.cat(all_targets, dim=0)                 # B, 17, 2
+        predictions = self._denormalize_keypoints_for_metrics(predictions)
+        targets = self._denormalize_keypoints_for_metrics(targets)
         metrics = calculate_pck_scores(predictions, targets)    # calculate pck@10, 20, 30, 40, 50
 
         return {

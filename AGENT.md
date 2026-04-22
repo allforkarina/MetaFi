@@ -57,13 +57,14 @@
 ## HDF5 Dataset Format
 
 - The formal training dataset is a single HDF5 file, not a directory of individual `.npy` and `.mat` files.
-- Store `keypoints`, `csi_amplitude`, `csi_phase`, `action`, `sample`, `environment`, and `frame_id` in the HDF5 file.
+- Store `keypoints`, `csi_amplitude`, `action`, `sample`, `environment`, and `frame_id` in the HDF5 file.
 - Store `train_indices`, `val_indices`, and `test_indices` in the same HDF5 file so training can load splits directly.
-- Keep `csi_phase` in the HDF5 file even though the current model trains only on `csi_amplitude`.
 - Clean `csi_amplitude` during HDF5 packing before training use; replace frame-local non-finite amplitude values with finite bounds from the same frame.
-- Validate that `csi_phase` stays fully finite during HDF5 packing; fail the packing step if non-finite phase values are found.
 - Normalize `csi_amplitude` with one global min-max computed from the cleaned train split only, then apply that same normalization to train, validation, and test frames.
 - The `csi_amplitude` stored in HDF5 is the cleaned and normalized training input, not the untouched raw amplitude array.
+- Normalize `keypoints` with one train-split global axis-wise scale: divide x coordinates by `train_keypoint_x_max` and y coordinates by `train_keypoint_y_max`.
+- Store the normalized keypoints in HDF5 and save the normalization metadata in attrs as `keypoint_normalization = train_axis_max`, `keypoint_x_scale`, and `keypoint_y_scale`.
+- Keep the HDF5 file as a training-plus-diagnosis artifact: retain `action`, `sample`, `environment`, and `frame_id`, but drop unused `csi_phase` storage.
 
 ## Shared CNN Encoder
 
@@ -94,11 +95,13 @@
 - The top-level end-to-end model is `WPFormer`, which chains `SharedCNN` and `TransformerDecoderModule`.
 - `WPFormer` takes CSI amplitude input with shape `[B, 3, 114, 10]` and outputs pose predictions with shape `[B, 17, 2]`.
 - The training loss is plain coordinate-space MSE between predictions and labels.
+- The MSE loss is computed in the normalized keypoint coordinate space stored in HDF5.
 - Do not add pose adjacency matrix constraints to the loss, because the paper reports that such constraints hurt performance for MetaFi++.
 - The main evaluation metric is torso-normalized PCK.
 - Use the Euclidean distance between the right shoulder and left hip ground-truth keypoints as the torso length reference.
 - Under the COCO 17-keypoint order used in this project, the right shoulder index is `6` and the left hip index is `11`.
 - Default evaluation thresholds are `PCK@10` through `PCK@50`, implemented as normalized thresholds `0.10` through `0.50`.
+- Before computing PCK, denormalize both predictions and targets back to the original pixel-coordinate space using the HDF5 keypoint scale attrs.
 - The default optimizer preparation follows the paper setting: SGDM with batch size `32`, learning rate `0.001`, momentum `0.9`, and lambda-based decay to zero.
 
 ## Trainer Engine

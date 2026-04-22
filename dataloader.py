@@ -27,6 +27,7 @@ FRAMES_PER_SAMPLE = 297
 KEYPOINT_SHAPE = (17, 2)
 CSI_SHAPE = (3, 114, 10)
 AMPLITUDE_NORMALIZATION_ATTR = "train_global_minmax"
+KEYPOINT_NORMALIZATION_ATTR = "train_axis_max"
 
 # Sequence-level : Axx/Syy/rgb(wifi-csi) total frames
 @dataclass(frozen=True)
@@ -233,22 +234,27 @@ def _decode_string(value: str | bytes) -> str:
     return str(value)
 
 
-def _load_raw_frame(record: FrameRecord) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _load_raw_frame(record: FrameRecord) -> tuple[np.ndarray, np.ndarray]:
     """Load one aligned raw frame and validate its expected shapes."""
 
     keypoints = np.load(record.keypoint_path).astype(np.float32)
-    csi_data = loadmat(record.csi_path)
+    csi_data = loadmat(record.csi_path, variable_names=["CSIamp"])
     csi_amplitude = np.asarray(csi_data["CSIamp"], dtype=np.float32)
-    csi_phase = np.asarray(csi_data["CSIphase"], dtype=np.float32)
 
     if keypoints.shape != KEYPOINT_SHAPE:
         raise ValueError(f"Unexpected keypoint shape for {record.keypoint_path}: {keypoints.shape}")
     if csi_amplitude.shape != CSI_SHAPE:
         raise ValueError(f"Unexpected CSI amplitude shape for {record.csi_path}: {csi_amplitude.shape}")
-    if csi_phase.shape != CSI_SHAPE:
-        raise ValueError(f"Unexpected CSI phase shape for {record.csi_path}: {csi_phase.shape}")
 
-    return keypoints, csi_amplitude, csi_phase
+    return keypoints, csi_amplitude
+
+
+def _validate_keypoints(keypoints: np.ndarray, source: Path) -> np.ndarray:
+    """Ensure keypoint labels are finite before normalization and training use."""
+
+    if not np.isfinite(keypoints).all():
+        raise ValueError(f"Keypoints contain non-finite values: {source}")
+    return keypoints
 
 
 def _clean_csi_amplitude(csi_amplitude: np.ndarray, source: Path) -> np.ndarray:
@@ -275,21 +281,13 @@ def _clean_csi_amplitude(csi_amplitude: np.ndarray, source: Path) -> np.ndarray:
     return cleaned
 
 
-def _validate_csi_phase(csi_phase: np.ndarray, source: Path) -> np.ndarray:
-    """Ensure CSI phase stays finite because the current training pipeline stores it unchanged."""
+def _prepare_raw_frame(record: FrameRecord) -> tuple[np.ndarray, np.ndarray]:
+    """Load one frame and apply the cleaning required for stable training."""
 
-    if not np.isfinite(csi_phase).all():
-        raise ValueError(f"CSI phase contains non-finite values: {source}")
-    return csi_phase
-
-
-def _prepare_raw_frame(record: FrameRecord) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load one frame and apply the amplitude cleaning required for stable training."""
-
-    keypoints, csi_amplitude, csi_phase = _load_raw_frame(record)                   # get keypoint and data in raw format
+    keypoints, csi_amplitude = _load_raw_frame(record)                              # get keypoint and data in raw format
+    keypoints = _validate_keypoints(keypoints, source=record.keypoint_path)         # validate
     csi_amplitude = _clean_csi_amplitude(csi_amplitude, source=record.csi_path)     # clean
-    csi_phase = _validate_csi_phase(csi_phase, source=record.csi_path)              # Don't used, judge whether the phase is valid or not.
-    return keypoints, csi_amplitude, csi_phase
+    return keypoints, csi_amplitude
 
 
 def _compute_train_amplitude_bounds(records: Sequence[FrameRecord]) -> tuple[float, float]:
@@ -300,7 +298,7 @@ def _compute_train_amplitude_bounds(records: Sequence[FrameRecord]) -> tuple[flo
 
     # find by frame
     for record in tqdm(records, desc="Computing train amplitude bounds", dynamic_ncols=True):
-        _, csi_amplitude, _ = _prepare_raw_frame(record)
+        _, csi_amplitude = _prepare_raw_frame(record)
         global_min = min(global_min, float(np.min(csi_amplitude)))
         global_max = max(global_max, float(np.max(csi_amplitude)))
 
@@ -325,6 +323,53 @@ def _normalize_csi_amplitude(
     return normalized.astype(np.float32)
 
 
+def _compute_train_keypoint_scales(records: Sequence[FrameRecord]) -> tuple[float, float]:
+    """Compute per-axis global maxima on the train split for stable keypoint scaling."""
+
+    global_x_max = float("-inf")
+    global_y_max = float("-inf")
+
+    for record in tqdm(records, desc="Computing train keypoint scales", dynamic_ncols=True):
+        keypoints, _ = _prepare_raw_frame(record)
+        global_x_max = max(global_x_max, float(np.max(keypoints[:, 0])))
+        global_y_max = max(global_y_max, float(np.max(keypoints[:, 1])))
+
+    if not np.isfinite(global_x_max) or not np.isfinite(global_y_max):
+        raise ValueError("Train keypoint scales must be finite")
+    if global_x_max <= 0.0 or global_y_max <= 0.0:
+        raise ValueError(
+            f"Train keypoint scales must be positive, got x={global_x_max}, y={global_y_max}"
+        )
+
+    return global_x_max, global_y_max
+
+
+def _normalize_keypoints(
+    keypoints: np.ndarray,
+    x_scale: float,
+    y_scale: float,
+) -> np.ndarray:
+    """Apply one train-split global axis-wise scaling to keypoint coordinates."""
+
+    normalized = keypoints.copy()
+    normalized[:, 0] = normalized[:, 0] / x_scale
+    normalized[:, 1] = normalized[:, 1] / y_scale
+    return normalized.astype(np.float32)
+
+
+def denormalize_keypoints(
+    keypoints: np.ndarray,
+    x_scale: float,
+    y_scale: float,
+) -> np.ndarray:
+    """Restore normalized keypoints to their original pixel-coordinate scale."""
+
+    restored = np.asarray(keypoints, dtype=np.float32).copy()
+    restored[..., 0] = restored[..., 0] * x_scale
+    restored[..., 1] = restored[..., 1] * y_scale
+    return restored.astype(np.float32)
+
+
 def build_h5_dataset(
     dataset_root: str | Path,
     output_path: str | Path,
@@ -344,6 +389,7 @@ def build_h5_dataset(
     }
     # find global min and max of train dataset
     train_min, train_max = _compute_train_amplitude_bounds(split_records["train"])
+    keypoint_x_scale, keypoint_y_scale = _compute_train_keypoint_scales(split_records["train"])
     
     # calculate the size of each dataset split, pre-allocated.
     total_records = sum(len(records) for records in split_records.values())
@@ -351,15 +397,12 @@ def build_h5_dataset(
 
     # "w" -> write
     with h5py.File(target_path, "w") as h5_file:
-        # Add keypoints, CSI amplitude/phase, and action/sample/environment/frame_id to the HDF5 file.
+        # Add normalized keypoints, CSI amplitude, and metadata fields to the HDF5 file.
         keypoints_dataset = h5_file.create_dataset(
             "keypoints", shape=(total_records, *KEYPOINT_SHAPE), dtype=np.float32
         )
         amplitude_dataset = h5_file.create_dataset(
             "csi_amplitude", shape=(total_records, *CSI_SHAPE), dtype=np.float32
-        )
-        phase_dataset = h5_file.create_dataset(
-            "csi_phase", shape=(total_records, *CSI_SHAPE), dtype=np.float32
         )
         action_dataset = h5_file.create_dataset("action", shape=(total_records,), dtype=string_dtype)
         sample_dataset = h5_file.create_dataset("sample", shape=(total_records,), dtype=string_dtype)
@@ -374,6 +417,9 @@ def build_h5_dataset(
         h5_file.attrs["amplitude_normalization"] = AMPLITUDE_NORMALIZATION_ATTR
         h5_file.attrs["amplitude_train_min"] = train_min
         h5_file.attrs["amplitude_train_max"] = train_max
+        h5_file.attrs["keypoint_normalization"] = KEYPOINT_NORMALIZATION_ATTR
+        h5_file.attrs["keypoint_x_scale"] = keypoint_x_scale
+        h5_file.attrs["keypoint_y_scale"] = keypoint_y_scale
 
         # Start writing the data
         offset = 0
@@ -385,7 +431,12 @@ def build_h5_dataset(
 
                 for local_index, record in enumerate(records):
                     dataset_index = offset + local_index
-                    keypoints, csi_amplitude, csi_phase = _prepare_raw_frame(record)
+                    keypoints, csi_amplitude = _prepare_raw_frame(record)
+                    keypoints = _normalize_keypoints(
+                        keypoints,
+                        x_scale=keypoint_x_scale,
+                        y_scale=keypoint_y_scale,
+                    )
                     csi_amplitude = _normalize_csi_amplitude(
                         csi_amplitude,
                         train_min=train_min,                                            # Not only train dataset use train_min and train_max, but also val and test.
@@ -394,7 +445,6 @@ def build_h5_dataset(
 
                     keypoints_dataset[dataset_index] = keypoints                        # write data into train/val/test dataset
                     amplitude_dataset[dataset_index] = csi_amplitude
-                    phase_dataset[dataset_index] = csi_phase
                     action_dataset[dataset_index] = record.action
                     sample_dataset[dataset_index] = record.sample
                     environment_dataset[dataset_index] = record.environment
@@ -424,6 +474,11 @@ class MMFiPoseDataset:
 
         with h5py.File(self.dataset_root, "r") as h5_file:
             self.indices = np.asarray(h5_file[f"{split}_indices"], dtype=np.int64)
+            self.keypoint_normalization = _decode_string(
+                h5_file.attrs.get("keypoint_normalization", "")
+            )
+            self.keypoint_x_scale = float(h5_file.attrs.get("keypoint_x_scale", 1.0))
+            self.keypoint_y_scale = float(h5_file.attrs.get("keypoint_y_scale", 1.0))
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -447,7 +502,7 @@ class MMFiPoseDataset:
         self.close()
 
     def __getitem__(self, index: int) -> Dict[str, np.ndarray | str]:
-        """Load one frame's keypoints and CSI amplitude/phase arrays from HDF5."""
+        """Load one frame's normalized keypoints and CSI amplitude arrays from HDF5."""
 
         h5_file = self._get_h5_file()
         frame_index = int(self.indices[index])
@@ -459,7 +514,6 @@ class MMFiPoseDataset:
             "frame_id": _decode_string(h5_file["frame_id"][frame_index]),
             "keypoints": np.asarray(h5_file["keypoints"][frame_index], dtype=np.float32),
             "csi_amplitude": np.asarray(h5_file["csi_amplitude"][frame_index], dtype=np.float32),
-            "csi_phase": np.asarray(h5_file["csi_phase"][frame_index], dtype=np.float32),
         }
 
 
@@ -549,7 +603,6 @@ def _preview_sample(dataset: MMFiPoseDataset) -> Dict[str, Tuple[int, ...] | str
         "frame_id": sample["frame_id"],
         "keypoints_shape": tuple(sample["keypoints"].shape),
         "csi_amplitude_shape": tuple(sample["csi_amplitude"].shape),
-        "csi_phase_shape": tuple(sample["csi_phase"].shape),
     }
 
 
