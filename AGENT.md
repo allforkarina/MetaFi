@@ -60,6 +60,10 @@
 - Store `keypoints`, `csi_amplitude`, `csi_phase`, `action`, `sample`, `environment`, and `frame_id` in the HDF5 file.
 - Store `train_indices`, `val_indices`, and `test_indices` in the same HDF5 file so training can load splits directly.
 - Keep `csi_phase` in the HDF5 file even though the current model trains only on `csi_amplitude`.
+- Clean `csi_amplitude` during HDF5 packing before training use; replace frame-local non-finite amplitude values with finite bounds from the same frame.
+- Validate that `csi_phase` stays fully finite during HDF5 packing; fail the packing step if non-finite phase values are found.
+- Normalize `csi_amplitude` with one global min-max computed from the cleaned train split only, then apply that same normalization to train, validation, and test frames.
+- The `csi_amplitude` stored in HDF5 is the cleaned and normalized training input, not the untouched raw amplitude array.
 
 ## Shared CNN Encoder
 

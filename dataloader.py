@@ -26,6 +26,7 @@ SPLIT_RATIOS = {"train": 6, "val": 2, "test": 2}
 FRAMES_PER_SAMPLE = 297
 KEYPOINT_SHAPE = (17, 2)
 CSI_SHAPE = (3, 114, 10)
+AMPLITUDE_NORMALIZATION_ATTR = "train_global_minmax"
 
 # Sequence-level : Axx/Syy/rgb(wifi-csi) total frames
 @dataclass(frozen=True)
@@ -250,6 +251,79 @@ def _load_raw_frame(record: FrameRecord) -> tuple[np.ndarray, np.ndarray, np.nda
     return keypoints, csi_amplitude, csi_phase
 
 
+def _clean_csi_amplitude(csi_amplitude: np.ndarray, source: Path) -> np.ndarray:
+    """Replace non-finite amplitude values with finite frame-local bounds."""
+
+    finite_mask = np.isfinite(csi_amplitude)
+    if finite_mask.all():
+        return csi_amplitude
+
+    finite_values = csi_amplitude[finite_mask]
+    if finite_values.size == 0:
+        raise ValueError(f"CSI amplitude contains no finite values: {source}")
+
+    finite_min = np.min(finite_values)
+    finite_max = np.max(finite_values)
+    cleaned = csi_amplitude.copy()
+    cleaned[np.isnan(cleaned)] = finite_min
+    cleaned[np.isneginf(cleaned)] = finite_min
+    cleaned[np.isposinf(cleaned)] = finite_max
+
+    if not np.isfinite(cleaned).all():
+        raise ValueError(f"CSI amplitude still contains non-finite values after cleaning: {source}")
+
+    return cleaned
+
+
+def _validate_csi_phase(csi_phase: np.ndarray, source: Path) -> np.ndarray:
+    """Ensure CSI phase stays finite because the current training pipeline stores it unchanged."""
+
+    if not np.isfinite(csi_phase).all():
+        raise ValueError(f"CSI phase contains non-finite values: {source}")
+    return csi_phase
+
+
+def _prepare_raw_frame(record: FrameRecord) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load one frame and apply the amplitude cleaning required for stable training."""
+
+    keypoints, csi_amplitude, csi_phase = _load_raw_frame(record)
+    csi_amplitude = _clean_csi_amplitude(csi_amplitude, source=record.csi_path)
+    csi_phase = _validate_csi_phase(csi_phase, source=record.csi_path)
+    return keypoints, csi_amplitude, csi_phase
+
+
+def _compute_train_amplitude_bounds(records: Sequence[FrameRecord]) -> tuple[float, float]:
+    """Compute global min/max on cleaned train-split amplitudes only."""
+
+    global_min = float("inf")
+    global_max = float("-inf")
+
+    for record in tqdm(records, desc="Computing train amplitude bounds", dynamic_ncols=True):
+        _, csi_amplitude, _ = _prepare_raw_frame(record)
+        global_min = min(global_min, float(np.min(csi_amplitude)))
+        global_max = max(global_max, float(np.max(csi_amplitude)))
+
+    if not np.isfinite(global_min) or not np.isfinite(global_max):
+        raise ValueError("Train amplitude bounds must be finite after cleaning")
+    if global_max <= global_min:
+        raise ValueError(
+            f"Train amplitude bounds are invalid for min-max normalization: min={global_min}, max={global_max}"
+        )
+
+    return global_min, global_max
+
+
+def _normalize_csi_amplitude(
+    csi_amplitude: np.ndarray,
+    train_min: float,
+    train_max: float,
+) -> np.ndarray:
+    """Apply one train-split global min-max normalization to all amplitudes."""
+
+    normalized = (csi_amplitude - train_min) / (train_max - train_min)
+    return normalized.astype(np.float32)
+
+
 def build_h5_dataset(
     dataset_root: str | Path,
     output_path: str | Path,
@@ -267,6 +341,7 @@ def build_h5_dataset(
     split_records = {
         split_name: expand_frame_records(sample_splits[split_name]) for split_name in SPLIT_NAMES
     }
+    train_min, train_max = _compute_train_amplitude_bounds(split_records["train"])
     
     # calculate the size of each dataset split, pre-allocated.
     total_records = sum(len(records) for records in split_records.values())     
@@ -294,6 +369,9 @@ def build_h5_dataset(
         h5_file.attrs["source_root"] = str(source_root)
         h5_file.attrs["seed"] = seed
         h5_file.attrs["frames_per_sample"] = FRAMES_PER_SAMPLE
+        h5_file.attrs["amplitude_normalization"] = AMPLITUDE_NORMALIZATION_ATTR
+        h5_file.attrs["amplitude_train_min"] = train_min
+        h5_file.attrs["amplitude_train_max"] = train_max
 
         # Start writing the data
         offset = 0
@@ -305,7 +383,12 @@ def build_h5_dataset(
 
                 for local_index, record in enumerate(records):
                     dataset_index = offset + local_index
-                    keypoints, csi_amplitude, csi_phase = _load_raw_frame(record)
+                    keypoints, csi_amplitude, csi_phase = _prepare_raw_frame(record)
+                    csi_amplitude = _normalize_csi_amplitude(
+                        csi_amplitude,
+                        train_min=train_min,
+                        train_max=train_max,
+                    )
 
                     keypoints_dataset[dataset_index] = keypoints
                     amplitude_dataset[dataset_index] = csi_amplitude

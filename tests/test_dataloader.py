@@ -64,10 +64,16 @@ def test_build_h5_dataset_preserves_shapes_values_and_split_counts(
     first_train_record = dataloader.expand_frame_records(
         dataloader.build_sample_splits(raw_root, seed=7)["train"]
     )[0]
-    raw_keypoints = np.load(first_train_record.keypoint_path).astype(np.float32)
-    raw_csi = loadmat(first_train_record.csi_path)
-    raw_amplitude = np.asarray(raw_csi["CSIamp"], dtype=np.float32)
-    raw_phase = np.asarray(raw_csi["CSIphase"], dtype=np.float32)
+    raw_keypoints, cleaned_amplitude, raw_phase = dataloader._prepare_raw_frame(first_train_record)
+    train_records = dataloader.expand_frame_records(
+        dataloader.build_sample_splits(raw_root, seed=7)["train"]
+    )
+    expected_train_min, expected_train_max = dataloader._compute_train_amplitude_bounds(train_records)
+    expected_normalized_amplitude = dataloader._normalize_csi_amplitude(
+        cleaned_amplitude,
+        train_min=expected_train_min,
+        train_max=expected_train_max,
+    )
 
     with h5py.File(output_path, "r") as h5_file:
         assert h5_file["keypoints"].shape == (80, 17, 2)
@@ -77,14 +83,22 @@ def test_build_h5_dataset_preserves_shapes_values_and_split_counts(
         assert h5_file["val_indices"].shape == (16,)
         assert h5_file["test_indices"].shape == (16,)
         assert h5_file.attrs["frames_per_sample"] == 2
+        assert h5_file.attrs["amplitude_normalization"] == dataloader.AMPLITUDE_NORMALIZATION_ATTR
+        assert h5_file.attrs["amplitude_train_min"] == pytest.approx(expected_train_min)
+        assert h5_file.attrs["amplitude_train_max"] == pytest.approx(expected_train_max)
 
         np.testing.assert_allclose(h5_file["keypoints"][0], raw_keypoints)
-        np.testing.assert_allclose(h5_file["csi_amplitude"][0], raw_amplitude)
+        np.testing.assert_allclose(h5_file["csi_amplitude"][0], expected_normalized_amplitude)
         np.testing.assert_allclose(h5_file["csi_phase"][0], raw_phase)
         assert h5_file["action"][0].decode("utf-8") == first_train_record.action
         assert h5_file["sample"][0].decode("utf-8") == first_train_record.sample
         assert h5_file["environment"][0].decode("utf-8") == first_train_record.environment
         assert h5_file["frame_id"][0].decode("utf-8") == first_train_record.frame_stem
+
+        train_values = h5_file["csi_amplitude"][h5_file["train_indices"][:]]
+        assert np.isfinite(train_values).all()
+        assert float(train_values.min()) == pytest.approx(0.0)
+        assert float(train_values.max()) == pytest.approx(1.0)
 
 
 def test_h5_dataset_and_dataloader_return_expected_fields(
@@ -124,3 +138,41 @@ def test_h5_dataset_and_dataloader_return_expected_fields(
     train_dataset.close()
     val_dataset.close()
     test_dataset.close()
+
+
+def test_build_h5_dataset_cleans_non_finite_amplitude_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / "dataset"
+    output_path = tmp_path / "mmfi_pose.h5"
+    monkeypatch.setattr(dataloader, "FRAMES_PER_SAMPLE", 2)
+    _create_raw_dataset(raw_root, frames_per_sample=2)
+
+    corrupted_path = raw_root / "A01" / "S01" / "wifi-csi" / "frame001.mat"
+    corrupted = loadmat(corrupted_path)
+    amplitude = np.asarray(corrupted["CSIamp"], dtype=np.float32)
+    amplitude[0, 0, 0] = -np.inf
+    savemat(corrupted_path, {"CSIamp": amplitude, "CSIphase": corrupted["CSIphase"]})
+
+    dataloader.build_h5_dataset(raw_root, output_path, seed=11)
+
+    with h5py.File(output_path, "r") as h5_file:
+        assert np.isfinite(h5_file["csi_amplitude"][:]).all()
+
+
+def test_build_h5_dataset_rejects_non_finite_phase_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / "dataset"
+    output_path = tmp_path / "mmfi_pose.h5"
+    monkeypatch.setattr(dataloader, "FRAMES_PER_SAMPLE", 2)
+    _create_raw_dataset(raw_root, frames_per_sample=2)
+
+    corrupted_path = raw_root / "A01" / "S01" / "wifi-csi" / "frame001.mat"
+    corrupted = loadmat(corrupted_path)
+    phase = np.asarray(corrupted["CSIphase"], dtype=np.float32)
+    phase[0, 0, 0] = np.nan
+    savemat(corrupted_path, {"CSIamp": corrupted["CSIamp"], "CSIphase": phase})
+
+    with pytest.raises(ValueError, match="CSI phase contains non-finite values"):
+        dataloader.build_h5_dataset(raw_root, output_path, seed=11)
