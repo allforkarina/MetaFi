@@ -113,6 +113,7 @@
 - The trainer tracks `best_val_pck50` and saves the best checkpoint only.
 - Loss visualization is required: after each epoch, update a loss curve plot that shows both train loss and val loss across epochs.
 - Save the loss curve image inside the training output directory so each training run keeps its own loss-trend figure.
+- Keep reusable diagnostic utilities under `tests/` when the user explicitly asks to preserve them for future server-side debugging.
 
 ## Code Change Principles
 
