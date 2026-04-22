@@ -392,7 +392,7 @@ def build_h5_dataset(
                         train_max=train_max,
                     )
 
-                    keypoints_dataset[dataset_index] = keypoints
+                    keypoints_dataset[dataset_index] = keypoints                        # write data into train/val/test dataset
                     amplitude_dataset[dataset_index] = csi_amplitude
                     phase_dataset[dataset_index] = csi_phase
                     action_dataset[dataset_index] = record.action
