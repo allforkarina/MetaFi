@@ -357,6 +357,7 @@ def _normalize_keypoints(
     return normalized.astype(np.float32)
 
 
+# de-normalize the keypoints for visualization.
 def denormalize_keypoints(
     keypoints: np.ndarray,
     x_scale: float,
@@ -432,12 +433,12 @@ def build_h5_dataset(
                 for local_index, record in enumerate(records):
                     dataset_index = offset + local_index
                     keypoints, csi_amplitude = _prepare_raw_frame(record)
-                    keypoints = _normalize_keypoints(
+                    keypoints = _normalize_keypoints(                                   # Normalize the keypoints
                         keypoints,
                         x_scale=keypoint_x_scale,
                         y_scale=keypoint_y_scale,
                     )
-                    csi_amplitude = _normalize_csi_amplitude(
+                    csi_amplitude = _normalize_csi_amplitude(                           # Normalize the CSI amplitude
                         csi_amplitude,
                         train_min=train_min,                                            # Not only train dataset use train_min and train_max, but also val and test.
                         train_max=train_max,
