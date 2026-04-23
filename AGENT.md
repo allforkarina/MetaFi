@@ -57,18 +57,21 @@
 ## HDF5 Dataset Format
 
 - The formal training dataset is a single HDF5 file, not a directory of individual `.npy` and `.mat` files.
-- Store `keypoints`, `csi_amplitude`, `action`, `sample`, `environment`, and `frame_id` in the HDF5 file.
+- Store `keypoints`, `csi_amplitude`, `csi_phase`, `csi_phase_cos`, `action`, `sample`, `environment`, and `frame_id` in the HDF5 file.
 - Store `train_indices`, `val_indices`, and `test_indices` in the same HDF5 file so training can load splits directly.
 - Clean `csi_amplitude` during HDF5 packing before training use; replace frame-local non-finite amplitude values with finite bounds from the same frame.
 - Normalize `csi_amplitude` with one global min-max computed from the cleaned train split only, then apply that same normalization to train, validation, and test frames.
 - The `csi_amplitude` stored in HDF5 is the cleaned and normalized training input, not the untouched raw amplitude array.
+- Clean `csi_phase` during HDF5 packing by interpolating non-finite values along subcarriers, unwrapping phase along the subcarrier dimension, and removing each antenna/time-snapshot subcarrier linear trend plus mean offset.
+- Store `csi_phase_cos = cos(csi_phase)` after phase cleaning so later model experiments can use a bounded phase-derived feature without recomputing it online.
 - Normalize `keypoints` with one train-split global axis-wise scale: divide x coordinates by `train_keypoint_x_max` and y coordinates by `train_keypoint_y_max`.
 - Store the normalized keypoints in HDF5 and save the normalization metadata in attrs as `keypoint_normalization = train_axis_max`, `keypoint_x_scale`, and `keypoint_y_scale`.
-- Keep the HDF5 file as a training-plus-diagnosis artifact: retain `action`, `sample`, `environment`, and `frame_id`, but drop unused `csi_phase` storage.
+- Keep the HDF5 file as a training-plus-diagnosis artifact: retain `action`, `sample`, `environment`, and `frame_id` together with amplitude and cleaned phase features.
 
 ## Shared CNN Encoder
 
 - The first model-stage CSI encoder uses amplitude-only input from `csi_amplitude`.
+- Cleaned phase features are available from the dataloader as `csi_phase` and `csi_phase_cos`, but the current WPFormer training path does not consume them yet.
 - The Shared CNN module expects one frame of CSI input with shape `[B, 3, 114, 10]`.
 - The input is split into three single-antenna branches, one branch per receiving antenna.
 - Each branch is upsampled from `[B, 1, 114, 10]` to `[B, 1, 136, 32]` with bilinear interpolation.

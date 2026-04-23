@@ -156,7 +156,8 @@ Transformer 的自注意力正适合完成全局关系整合。
 为解决这一问题，项目新增了离线 HDF5 打包流程：
 
 - 先一次性遍历原始数据集
-- 将 `keypoints`、`csi_amplitude`、`csi_phase` 和元信息写入单个 `.h5`
+- 将 `keypoints`、`csi_amplitude`、清洗后的 `csi_phase`、`csi_phase_cos` 和元信息写入单个 `.h5`
+- 在离线打包阶段完成相位非有限值修复、子载波维度解卷绕、线性趋势/均值偏置去除以及 `cos(phase)` 计算
 - 同时固化 train / val / test 的 frame 索引
 
 这样训练时只需要顺序或近顺序访问一个大文件，显著减少小文件随机 I/O 和 `loadmat` 解析负担。  

@@ -63,7 +63,9 @@ def test_build_h5_dataset_preserves_shapes_values_and_split_counts(
     first_train_record = dataloader.expand_frame_records(
         dataloader.build_sample_splits(raw_root, seed=7)["train"]
     )[0]
-    raw_keypoints, cleaned_amplitude = dataloader._prepare_raw_frame(first_train_record)
+    raw_keypoints, cleaned_amplitude, cleaned_phase, phase_cos = dataloader._prepare_raw_frame(
+        first_train_record
+    )
     train_records = dataloader.expand_frame_records(
         dataloader.build_sample_splits(raw_root, seed=7)["train"]
     )
@@ -85,7 +87,8 @@ def test_build_h5_dataset_preserves_shapes_values_and_split_counts(
     with h5py.File(output_path, "r") as h5_file:
         assert h5_file["keypoints"].shape == (80, 17, 2)
         assert h5_file["csi_amplitude"].shape == (80, 3, 114, 10)
-        assert "csi_phase" not in h5_file
+        assert h5_file["csi_phase"].shape == (80, 3, 114, 10)
+        assert h5_file["csi_phase_cos"].shape == (80, 3, 114, 10)
         assert h5_file["train_indices"].shape == (48,)
         assert h5_file["val_indices"].shape == (16,)
         assert h5_file["test_indices"].shape == (16,)
@@ -96,9 +99,12 @@ def test_build_h5_dataset_preserves_shapes_values_and_split_counts(
         assert h5_file.attrs["keypoint_normalization"] == dataloader.KEYPOINT_NORMALIZATION_ATTR
         assert h5_file.attrs["keypoint_x_scale"] == pytest.approx(expected_keypoint_x_scale)
         assert h5_file.attrs["keypoint_y_scale"] == pytest.approx(expected_keypoint_y_scale)
+        assert h5_file.attrs["phase_cleaning"] == dataloader.PHASE_CLEANING_ATTR
 
         np.testing.assert_allclose(h5_file["keypoints"][0], expected_normalized_keypoints)
         np.testing.assert_allclose(h5_file["csi_amplitude"][0], expected_normalized_amplitude)
+        np.testing.assert_allclose(h5_file["csi_phase"][0], cleaned_phase, atol=1e-6)
+        np.testing.assert_allclose(h5_file["csi_phase_cos"][0], phase_cos, atol=1e-6)
         assert h5_file["action"][0].decode("utf-8") == first_train_record.action
         assert h5_file["sample"][0].decode("utf-8") == first_train_record.sample
         assert h5_file["environment"][0].decode("utf-8") == first_train_record.environment
@@ -139,13 +145,16 @@ def test_h5_dataset_and_dataloader_return_expected_fields(
     assert sample["frame_id"].startswith("frame")
     assert sample["keypoints"].shape == (17, 2)
     assert sample["csi_amplitude"].shape == (3, 114, 10)
-    assert "csi_phase" not in sample
+    assert sample["csi_phase"].shape == (3, 114, 10)
+    assert sample["csi_phase_cos"].shape == (3, 114, 10)
 
     loaders = dataloader.create_data_loaders(output_path, batch_size=4, num_workers=0)
     batch = next(iter(loaders["train"]))
 
     assert batch["keypoints"].shape == (4, 17, 2)
     assert batch["csi_amplitude"].shape == (4, 3, 114, 10)
+    assert batch["csi_phase"].shape == (4, 3, 114, 10)
+    assert batch["csi_phase_cos"].shape == (4, 3, 114, 10)
 
     train_dataset.close()
     val_dataset.close()
@@ -170,6 +179,49 @@ def test_build_h5_dataset_cleans_non_finite_amplitude_values(
 
     with h5py.File(output_path, "r") as h5_file:
         assert np.isfinite(h5_file["csi_amplitude"][:]).all()
+
+
+def test_build_h5_dataset_cleans_non_finite_phase_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_root = tmp_path / "dataset"
+    output_path = tmp_path / "mmfi_pose.h5"
+    monkeypatch.setattr(dataloader, "FRAMES_PER_SAMPLE", 2)
+    _create_raw_dataset(raw_root, frames_per_sample=2)
+
+    corrupted_path = raw_root / "A01" / "S01" / "wifi-csi" / "frame001.mat"
+    corrupted = loadmat(corrupted_path)
+    phase = np.asarray(corrupted["CSIphase"], dtype=np.float32)
+    phase[0, 0, 0] = np.nan
+    phase[0, 1, 0] = np.inf
+    savemat(corrupted_path, {"CSIamp": corrupted["CSIamp"], "CSIphase": phase})
+
+    dataloader.build_h5_dataset(raw_root, output_path, seed=11)
+
+    with h5py.File(output_path, "r") as h5_file:
+        assert np.isfinite(h5_file["csi_phase"][:]).all()
+        assert np.isfinite(h5_file["csi_phase_cos"][:]).all()
+        assert float(h5_file["csi_phase_cos"][:].min()) >= -1.000001
+        assert float(h5_file["csi_phase_cos"][:].max()) <= 1.000001
+
+
+def test_clean_csi_phase_unwraps_and_removes_linear_trend() -> None:
+    subcarriers = np.arange(dataloader.CSI_SHAPE[1], dtype=np.float32)
+    linear_phase = 0.2 * subcarriers + 1.5
+    wrapped_phase = ((linear_phase + np.pi) % (2 * np.pi)) - np.pi
+    phase = np.broadcast_to(
+        wrapped_phase.reshape(1, dataloader.CSI_SHAPE[1], 1),
+        dataloader.CSI_SHAPE,
+    ).astype(np.float32)
+
+    cleaned_phase = dataloader._clean_csi_phase(phase, source=Path("synthetic.mat"))
+    phase_cos = dataloader._compute_csi_phase_cos(cleaned_phase)
+
+    assert np.isfinite(cleaned_phase).all()
+    assert np.isfinite(phase_cos).all()
+    assert float(np.max(np.abs(cleaned_phase))) < 1e-5
+    assert float(phase_cos.min()) >= -1.000001
+    assert float(phase_cos.max()) <= 1.000001
 
 
 def test_build_h5_dataset_rejects_non_finite_keypoint_values(
