@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sympy import Basic
+
 """HDF5-backed dataloader and raw-dataset packing utilities for MM-Fi pose data."""
 
 import argparse
@@ -19,6 +21,7 @@ except ImportError:  # pragma: no cover - handled at runtime when torch is unava
     DataLoader = None
 
 
+# Basic parameters setting, containing root path, split setting and shape etc.
 DEFAULT_LOCAL_DATASET_ROOT = Path(r"D:\Files\WiFi_Pose\WiFiPoseV3\data\dataset")
 DEFAULT_LINUX_DATASET_ROOT = Path("/data/WiFiPose/dataset/dataset")
 SPLIT_NAMES = ("train", "val", "test")
@@ -29,6 +32,7 @@ CSI_SHAPE = (3, 114, 10)
 AMPLITUDE_NORMALIZATION_ATTR = "train_global_minmax"
 KEYPOINT_NORMALIZATION_ATTR = "train_axis_max"
 PHASE_CLEANING_ATTR = "unwrap_subcarrier_detrend_mean"
+
 
 # Sequence-level : Axx/Syy/rgb(wifi-csi) total frames
 @dataclass(frozen=True)
@@ -83,7 +87,10 @@ def resolve_h5_dataset_path(dataset_root: str | Path) -> Path:
 
 
 def sample_to_environment(sample_name: str) -> str:
-    """Map sample ids S01-S40 to env1-env4 in blocks of ten samples."""
+    """
+    Map sample ids S01-S40 to env1-env4 in blocks of ten samples.
+    Each env contains 10 samples, such as S01-S10 -> env1 and so on.
+    """
 
     sample_index = int(sample_name[1:])                 # Syy -> yy -> turn to int
     environment_index = (sample_index - 1) // 10 + 1    # yy: 1-10 -> env1, 11-20 -> env2, 21-30 -> env3, 31-40 -> env4
@@ -123,7 +130,8 @@ def discover_sample_sequences(dataset_root: str | Path) -> List[SampleSequence]:
                 )
 
             # All frames, frame001 - frame297
-            sequences.append(
+            # collect all sequences, 27 x 40 in total
+            sequences.append(   
                 SampleSequence(
                     action=action_dir.name,
                     sample=sample_dir.name,
@@ -147,22 +155,23 @@ def build_sample_splits(
     """Split each (action, environment) group with a fixed 6:2:2 sample ratio."""
 
     # 6:2:2 default split ratio for train, val, test
-    ratios = split_ratios or SPLIT_RATIOS       
+    ratios = split_ratios or SPLIT_RATIOS 
 
     if tuple(ratios.keys()) != SPLIT_NAMES:
         raise ValueError(f"Split keys must be exactly {SPLIT_NAMES}, got {tuple(ratios.keys())}")
     if sum(ratios.values()) != 10:
         raise ValueError("Per-environment split ratios must sum to 10 samples")
 
-    # unordered grouping: action, environment -> Syy (Frame001 -> Frame297)
+    # unordered grouping: (action, environment) -> Syy Sequence(Frame001 -> Frame297)
     grouped_sequences: Dict[Tuple[str, str], List[SampleSequence]] = {}
     for sequence in discover_sample_sequences(dataset_root):
         grouped_sequences.setdefault((sequence.action, sequence.environment), []).append(sequence)
 
-    # split rule.
-    splits: Dict[str, List[SampleSequence]] = {name: [] for name in SPLIT_NAMES}
-    for (action, environment), sequences in sorted(grouped_sequences.items()):
-        ordered_sequences = sorted(sequences, key=lambda item: item.sample)
+    
+    splits: Dict[str, List[SampleSequence]] = {name: [] for name in SPLIT_NAMES}    # split into different name: train, val, test.
+    for (action, environment), sequences in sorted(grouped_sequences.items()):      # sorted by the dir name. Each grouped_sequence(action, env) contains 10 samples.
+        
+        ordered_sequences = sorted(sequences, key=lambda item: item.sample)         # sort the sequences by name, from S01 to S10, or S11 to S20 etc.
         if len(ordered_sequences) != 10:
             raise ValueError(
                 f"Expected 10 samples for {action}/{environment}, found {len(ordered_sequences)}"
@@ -170,10 +179,10 @@ def build_sample_splits(
 
         # shuffle first, in Axx/Envz dim.
         group_rng = random.Random(f"{seed}:{action}:{environment}")
-        shuffled_sequences = ordered_sequences[:]
-        group_rng.shuffle(shuffled_sequences)
+        shuffled_sequences = ordered_sequences[:]                       # S01 - S10 for example.
+        group_rng.shuffle(shuffled_sequences)                           # shuffle the sequence.
 
-        # choose the first 6 for train, next 2 for val, last 2 for test, in the shuffled order.
+        # choose the first 6 for train, next 2 for val, last 2 for test, from shuffled sequences.
         train_end = ratios["train"]
         val_end = train_end + ratios["val"]
         splits["train"].extend(shuffled_sequences[:train_end])          # 1 - 6
@@ -206,6 +215,7 @@ def expand_frame_records(sequences: Sequence[SampleSequence]) -> List[FrameRecor
 
         # keypoints, CSI files, pairs the data and labels
         for keypoint_path, csi_path in zip(keypoint_files, csi_files):
+            # check whether symmetric file name: frame001.npy to frame001.mat.
             if keypoint_path.stem != csi_path.stem:
                 raise ValueError(
                     f"Frame mismatch for {sequence.action}/{sequence.sample}: "
@@ -235,6 +245,7 @@ def _decode_string(value: str | bytes) -> str:
     return str(value)
 
 
+# load the keypoints and amp, not including phase.
 def _load_raw_keypoints_and_amplitude(record: FrameRecord) -> tuple[np.ndarray, np.ndarray]:
     """Load one aligned raw frame's labels and CSI amplitude."""
 
@@ -250,6 +261,7 @@ def _load_raw_keypoints_and_amplitude(record: FrameRecord) -> tuple[np.ndarray, 
     return keypoints, csi_amplitude
 
 
+# load the keypoints and full csi dta, including phase.
 def _load_raw_frame(record: FrameRecord) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load one aligned raw frame and validate its expected shapes."""
 
@@ -306,29 +318,33 @@ def _clean_csi_phase(csi_phase: np.ndarray, source: Path) -> np.ndarray:
     cleaned = np.asarray(csi_phase, dtype=np.float32).copy()
     subcarrier_indices = np.arange(CSI_SHAPE[1], dtype=np.float32)
 
-    for antenna_index in range(CSI_SHAPE[0]):
-        for time_index in range(CSI_SHAPE[2]):
-            phase_line = cleaned[antenna_index, :, time_index]
-            finite_mask = np.isfinite(phase_line)
+    for antenna_index in range(CSI_SHAPE[0]):                       # each antenna
+        for time_index in range(CSI_SHAPE[2]):                      # each time point
+            phase_line = cleaned[antenna_index, :, time_index]      # all subcarriers
+            finite_mask = np.isfinite(phase_line)                   # find the finite value indice.
+            
             if not finite_mask.any():
                 raise ValueError(f"CSI phase contains no finite values: {source}")
             if not finite_mask.all():
-                phase_line = np.interp(
+                phase_line = np.interp(                             # interpolate the phase for infinite subcarrier value
                     subcarrier_indices,
                     subcarrier_indices[finite_mask],
                     phase_line[finite_mask],
                 ).astype(np.float32)
-                cleaned[antenna_index, :, time_index] = phase_line
+                cleaned[antenna_index, :, time_index] = phase_line  # append to cleaned phase
 
-    unwrapped = np.unwrap(cleaned, axis=1).astype(np.float32)
+    unwrapped = np.unwrap(cleaned, axis=1).astype(np.float32)       # unwrap the phase to prevent huge jump
 
-    centered_subcarriers = (
-        subcarrier_indices - float(np.mean(subcarrier_indices))
-    ).reshape(1, CSI_SHAPE[1], 1)
-    phase_mean = np.mean(unwrapped, axis=1, keepdims=True)
-    slope = np.sum(centered_subcarriers * (unwrapped - phase_mean), axis=1, keepdims=True)
-    slope = slope / np.sum(centered_subcarriers * centered_subcarriers)
-    linear_trend = slope * centered_subcarriers + phase_mean
+    centered_subcarriers = (                                        # x - x_mean
+        subcarrier_indices - float(np.mean(subcarrier_indices))     # -56.5, ..., -0.5, 0.5, ..., 56.5
+    ).reshape(1, CSI_SHAPE[1], 1)                                   # [1, 114, 1]
+
+    phase_mean = np.mean(unwrapped, axis=1, keepdims=True)          # calculate the mean of each antenna and time slot, 3 x 1 x 10
+    
+    
+    slope = np.sum(centered_subcarriers * (unwrapped - phase_mean), axis=1, keepdims=True)  # sum( (x - x_mean) * (y - y_mean) )
+    slope = slope / np.sum(centered_subcarriers * centered_subcarriers)                     # slope / sum( (x - x_mean)^2 )
+    linear_trend = slope * centered_subcarriers + phase_mean                                # linear = slope * (x - x_mean) + y_mean
     calibrated = (unwrapped - linear_trend).astype(np.float32)
 
     if not np.isfinite(calibrated).all():
@@ -456,11 +472,12 @@ def build_h5_dataset(
     target_path = Path(output_path)                         # target hdf5 dataset path
     target_path.parent.mkdir(parents=True, exist_ok=True)   # ensure the dir exists
 
-    # First split in Sequence level
+    # First split in Sequence level, and expand to frame level.
     sample_splits = build_sample_splits(source_root, seed=seed, split_ratios=split_ratios)
     split_records = {
         split_name: expand_frame_records(sample_splits[split_name]) for split_name in SPLIT_NAMES
     }
+
     # find global min and max of train dataset
     train_min, train_max = _compute_train_amplitude_bounds(split_records["train"])
     keypoint_x_scale, keypoint_y_scale = _compute_train_keypoint_scales(split_records["train"])
@@ -471,7 +488,8 @@ def build_h5_dataset(
 
     # "w" -> write
     with h5py.File(target_path, "w") as h5_file:
-        # Add normalized keypoints, CSI amplitude, and metadata fields to the HDF5 file.
+        
+        # allocate datasets for keypoints, amp, phase and metadata.
         keypoints_dataset = h5_file.create_dataset(
             "keypoints", shape=(total_records, *KEYPOINT_SHAPE), dtype=np.float32
         )
@@ -653,6 +671,8 @@ def create_data_loaders(
         for split in SPLIT_NAMES
     }
 
+
+# ========== CLI utilities for dataset inspection and debugging ==========
 
 def summarize_splits(dataset_root: str | Path) -> Dict[str, Dict[str, int]]:
     """Return split statistics for the prepacked HDF5 dataset."""
