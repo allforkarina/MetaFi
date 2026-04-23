@@ -97,6 +97,10 @@
 
 - The top-level end-to-end model is `WPFormer`, which chains `SharedCNN` and `TransformerDecoderModule`.
 - `WPFormer` takes CSI amplitude input with shape `[B, 3, 114, 10]` and outputs pose predictions with shape `[B, 17, 2]`.
+- Keep `WPFormer` as the default amplitude-only baseline model and preserve the default training path as amplitude-only.
+- The amp-plus-phase model is `WPFormerAmpPhase`, which uses one independent `SharedCNN` for `csi_amplitude` and another independent `SharedCNN` for `csi_phase_cos`.
+- `WPFormerAmpPhase` concatenates the two encoder outputs along the channel dimension, uses a `1x1` convolution to fuse `1024 -> 512` channels, and then reuses the same `TransformerDecoderModule`.
+- Use `train.py --input-mode amp` for the default amplitude-only baseline and `train.py --input-mode amp_phase` to train with both amplitude and cleaned phase-cosine features.
 - The training loss is plain coordinate-space MSE between predictions and labels.
 - The MSE loss is computed in the normalized keypoint coordinate space stored in HDF5.
 - Do not add pose adjacency matrix constraints to the loss, because the paper reports that such constraints hurt performance for MetaFi++.

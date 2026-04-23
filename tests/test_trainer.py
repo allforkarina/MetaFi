@@ -48,6 +48,16 @@ class _ConstantModel(torch.nn.Module):
         return self._prediction.expand(x.shape[0], -1, -1) + (0.0 * self.dummy)
 
 
+class _ConstantAmpPhaseModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dummy = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, amplitude: torch.Tensor, phase_cos: torch.Tensor) -> torch.Tensor:
+        assert phase_cos.shape == amplitude.shape
+        return torch.zeros(amplitude.shape[0], 17, 2, device=amplitude.device) + (0.0 * self.dummy)
+
+
 def test_train_epoch_returns_train_loss(tmp_path: Path) -> None:
     trainer = Trainer(
         model=WPFormer(),
@@ -198,3 +208,24 @@ def test_validate_epoch_denormalizes_predictions_before_pck(
     assert metrics["pck@50"] == 1.0
     assert torch.allclose(captured["predictions"][0, 0], torch.tensor([50.0, 100.0]))
     assert torch.allclose(captured["targets"][0, 0], torch.tensor([50.0, 100.0]))
+
+
+def test_train_epoch_supports_amp_phase_input_mode(tmp_path: Path) -> None:
+    batch = {
+        "csi_amplitude": torch.zeros(2, 3, 114, 10),
+        "csi_phase_cos": torch.ones(2, 3, 114, 10),
+        "keypoints": torch.zeros(2, 17, 2),
+    }
+    trainer = Trainer(
+        model=_ConstantAmpPhaseModel(),
+        train_loader=[batch],
+        val_loader=[batch],
+        device="cpu",
+        num_epochs=1,
+        output_dir=tmp_path,
+        input_mode="amp_phase",
+    )
+
+    metrics = trainer.train_epoch()
+
+    assert metrics["train_loss"] == 0.0

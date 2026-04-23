@@ -8,6 +8,7 @@ import torch
 
 from dataloader import create_data_loaders
 from models.wpformer import WPFormer
+from models.wpformer_amp_phase import WPFormerAmpPhase
 from training import DEFAULT_BATCH_SIZE, DEFAULT_NUM_EPOCHS, Trainer
 
 
@@ -27,6 +28,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Batch size")
     parser.add_argument("--num-epochs", type=int, default=DEFAULT_NUM_EPOCHS, help="Training epochs")
+    parser.add_argument(
+        "--input-mode",
+        type=str,
+        choices=("amp", "amp_phase"),
+        default="amp",
+        help="Model input mode: amp uses CSI amplitude only; amp_phase also uses csi_phase_cos",
+    )
     parser.add_argument(
         "--checkpoint-path",
         type=str,
@@ -55,7 +63,7 @@ def main(argv: list[str] | None = None) -> list[dict[str, float]]:
         num_workers=args.num_workers,
     )
 
-    model = WPFormer()
+    model = WPFormerAmpPhase() if args.input_mode == "amp_phase" else WPFormer()
     trainer = Trainer(
         model=model,
         train_loader=loaders["train"],
@@ -64,6 +72,7 @@ def main(argv: list[str] | None = None) -> list[dict[str, float]]:
         num_epochs=args.num_epochs,
         checkpoint_path=args.checkpoint_path,
         output_dir=args.output_dir,
+        input_mode=args.input_mode,
     )
     return trainer.fit()
 

@@ -13,6 +13,8 @@ from tqdm import tqdm
 from .config import DEFAULT_NUM_EPOCHS, build_default_optimizer, build_lambda_scheduler
 from .objectives import calculate_mse_loss, calculate_pck_scores
 
+INPUT_MODES = ("amp", "amp_phase")
+
 
 class Trainer:
     """Coordinate training, validation, checkpointing, and loss visualization."""
@@ -26,12 +28,17 @@ class Trainer:
         num_epochs: int = DEFAULT_NUM_EPOCHS,           # 50
         checkpoint_path: str | Path | None = None,
         output_dir: str | Path = "outputs",
+        input_mode: str = "amp",
     ) -> None:
+        if input_mode not in INPUT_MODES:
+            raise ValueError(f"input_mode must be one of {INPUT_MODES}, got {input_mode}")
+
         self.device = torch.device(device)
         self.model = model.to(self.device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.num_epochs = num_epochs
+        self.input_mode = input_mode
         self.output_dir = Path(output_dir)
         self.plot_dir = self.output_dir / "plots"               # store the loss curve plot
         self.checkpoint_dir = self.output_dir / "checkpoints"   # store the best checkpoint of pck@50
@@ -49,10 +56,25 @@ class Trainer:
         self.history: list[dict[str, float]] = []               # trainning parameters history
         self.keypoint_x_scale, self.keypoint_y_scale = self._resolve_keypoint_scales()
 
-    def _prepare_batch(self, batch: dict[str, Any]) -> tuple[Tensor, Tensor]:
-        inputs = batch["csi_amplitude"].float().to(self.device) # [B, 3, 114, 10]
+    def _prepare_batch(self, batch: dict[str, Any]) -> tuple[Tensor | tuple[Tensor, Tensor], Tensor]:
+        amplitude = batch["csi_amplitude"].float().to(self.device) # [B, 3, 114, 10]
         targets = batch["keypoints"].float().to(self.device)    # [B, 17, 2]
-        return inputs, targets
+        if self.input_mode == "amp_phase":
+            phase_cos = batch["csi_phase_cos"].float().to(self.device)
+            return (amplitude, phase_cos), targets
+
+        return amplitude, targets
+
+    def _forward_model(self, inputs: Tensor | tuple[Tensor, Tensor]) -> Tensor:
+        if isinstance(inputs, tuple):
+            return self.model(*inputs)
+        return self.model(inputs)
+
+    @staticmethod
+    def _batch_size(inputs: Tensor | tuple[Tensor, Tensor]) -> int:
+        if isinstance(inputs, tuple):
+            return int(inputs[0].shape[0])
+        return int(inputs.shape[0])
 
     # get the scaling factors for keypoints
     def _resolve_keypoint_scales(self) -> tuple[float, float]:
@@ -92,12 +114,12 @@ class Trainer:
                 inputs, targets = self._prepare_batch(batch)
 
                 self.optimizer.zero_grad()                          # zero the parameter gradients
-                predictions = self.model(inputs)                    # predictions
+                predictions = self._forward_model(inputs)           # predictions
                 loss = calculate_mse_loss(predictions, targets)     # calculate the MSE loss
                 loss.backward()                                     # calculate the gradients of parameters
                 self.optimizer.step()                               # optimize the parameters
 
-                batch_size = inputs.shape[0]
+                batch_size = self._batch_size(inputs)
                 total_loss += loss.item() * batch_size              # total loss for epoch
                 total_samples += batch_size                         # total samples for epoch
                 progress_bar.set_postfix(train_loss=total_loss / total_samples)
@@ -116,10 +138,10 @@ class Trainer:
             with self._create_progress_bar(self.val_loader, description) as progress_bar:
                 for batch in progress_bar:
                     inputs, targets = self._prepare_batch(batch)
-                    predictions = self.model(inputs)
+                    predictions = self._forward_model(inputs)
                     loss = calculate_mse_loss(predictions, targets)
 
-                    batch_size = inputs.shape[0]
+                    batch_size = self._batch_size(inputs)
                     total_loss += loss.item() * batch_size
                     total_samples += batch_size
                     all_predictions.append(predictions.detach().cpu())

@@ -2,6 +2,7 @@
 
 from .shared_cnn import SharedCNN
 from .transformer_decoder import TransformerDecoderModule
+from .wpformer_amp_phase import WPFormerAmpPhase
 from .wpformer import WPFormer
 
-__all__ = ["SharedCNN", "TransformerDecoderModule", "WPFormer"]
+__all__ = ["SharedCNN", "TransformerDecoderModule", "WPFormer", "WPFormerAmpPhase"]

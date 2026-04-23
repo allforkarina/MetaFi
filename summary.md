@@ -185,6 +185,8 @@ Transformer 的自注意力正适合完成全局关系整合。
   - 自注意力与姿态解码器
 - `models/wpformer.py`
   - 端到端模型封装
+- `models/wpformer_amp_phase.py`
+  - 幅度与相位余弦双分支模型，两个独立 Shared CNN 编码后通过 `1x1` 卷积融合，再进入同一个 Transformer decoder
 - `training/objectives.py`
   - MSE loss
   - torso-normalized PCK 指标
