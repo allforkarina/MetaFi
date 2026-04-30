@@ -114,6 +114,7 @@ class SharedCNN(nn.Module):
 
     @staticmethod
     # upsample from [B, 1, 114, 10] to [B, 1, 136, 32]
+    #^ problem 01: upsample the input to a larger size with no reason.
     def _upsample_branch(x: Tensor) -> Tensor:
         return F.interpolate(x, size=(136, 32), mode="bilinear", align_corners=False)               
 

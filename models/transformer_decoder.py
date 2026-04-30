@@ -39,7 +39,7 @@ class AveragedHeadSelfAttention(nn.Module):
     def _compute_averaged_attention(self, q: Tensor, k: Tensor) -> Tensor:
         attn_logits = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)               # matrix multiplication and scaling, calculate the attention.
         attn_per_head = torch.softmax(attn_logits, dim=-1)                                          # softmax at the dimension of tokens (512) for each head
-        return attn_per_head.mean(dim=1)                                                            # average pool each head's attention logits (share attention)
+        return attn_per_head.mean(dim=1)                                                            #^ problem 02: each head attention is averaged across heads, eliminate each head's learned pattern
 
     def forward(self, x: Tensor) -> Tensor:
         if x.ndim != 3 or x.shape[-1] != self.embed_dim:
@@ -62,13 +62,19 @@ class AveragedHeadSelfAttention(nn.Module):
 
 
 class PoseDecoder(nn.Module):
-    """Map transformer features to 2D coordinate channels."""
+    """
+    Map transformer features to 2D coordinate channels.
+    
+    The decoder consists of two convolutional layers:
+    - Conv1: 3x3 kernel, from 512 channels to 32 channels, with ReLU activation.
+    - Conv2: 1x1 kernel, from 32 channels to 2 channels, representing the X and Y coordinates.
+    """
 
     def __init__(self) -> None:
         super().__init__()
-        self.conv1 = nn.Conv2d(512, 32, kernel_size=3, stride=1, padding=1)                         # channel: 512 -> 32
+        self.conv1 = nn.Conv2d(512, 32, kernel_size=3, stride=1, padding=1)                         # 3x3 conv, channel: 512 -> 32
         self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(32, 2, kernel_size=1, stride=1, padding=0)                           # channel: 32 -> 2, keypoints
+        self.conv2 = nn.Conv2d(32, 2, kernel_size=1, stride=1, padding=0)                           # 1x1 conv, channel: 32 -> 2, keypoints
 
     def forward(self, x: Tensor) -> Tensor:
         if x.ndim != 4 or x.shape[1:] != (512, 17, 12):
@@ -112,6 +118,6 @@ class TransformerDecoderModule(nn.Module):
         x = self.attention(x)                   # self-attention with averaged attention across heads, shape unchanged
         x = self._restore_spatial(x)            # flatten the embedding dim, from 204 to 17, 12
         x = self.decoder(x)                     # regression to keypoints, from 512 -> 32 -> 2
-        x = x.mean(dim=-1)                      # average pool over the spatial dimensions, 12 to none
+        x = x.mean(dim=-1)                      #^ problem 03: average pool over the spatial dimensions, 12 to none, eliminate the spatial info.
         x = x.transpose(1, 2)                   # out -> B, 17, 2
         return x
